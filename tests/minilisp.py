@@ -318,7 +318,7 @@ def mkdim(kind):
 def getbb(o, sa, sb):
     mn, mx = bbox(o); ENV[sa] = mn; ENV[sb] = mx
 
-VARS = {'TILEMODE': 1, 'CVPORT': 2, 'DIMSCALE': 1.0, 'DIMTXT': 2.5, 'DWGPREFIX': '', 'DWGNAME': 'test.dwg', 'VIEWSIZE': 100.0, 'DIMZIN': 8}
+VARS = {'TILEMODE': 1, 'CVPORT': 2, 'DIMSCALE': 1.0, 'DIMTXT': 2.5, 'DWGPREFIX': __import__('tempfile').mkdtemp() + os.sep, 'DWGNAME': 'test.dwg', 'VIEWSIZE': 100.0, 'DIMZIN': 8}
 
 class FakeFile:
     def __init__(s, p): s.p = p; s.lines = []
