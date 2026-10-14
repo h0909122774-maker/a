@@ -1,0 +1,8 @@
+// Sketch concept program (Yang & Pan, NeurIPS 2022, List 1)
+// L1 composite types
+T_Slot -> lambda().{t0:Line, t1:Arc, t2:Line, t3:Arc, R={Horizontal(t0), Coincident(t0,t1), Coincident(t0,t3), Horizontal(t2), Coincident(t2,t1), Coincident(t2,t3), Parallel(t0,t2), Equal(t0,t2), Tangent(t0,t1), Tangent(t0,t3), Tangent(t2,t1), Tangent(t2,t3), Equal(t1,t3)}}
+T_Point -> lambda().{t0:Point}
+// Sketch decomposition
+S -> {c0:T_Slot, c1:T_Point}
+R_S={}
+// Modularity = 100.0% (13/13 constraints inside concepts)

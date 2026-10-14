@@ -961,5 +961,133 @@
   (princ)
 )
 
-(princ "\n自動標註已載入。指令: AUTODIM、ADIMTOTAL、ACLIST (解讀設計概念)、ACDIM (依概念標註)、ACCOMPLETE (概念補全)")
+;;; ---------- 外部 Python: 執行論文的預訓練模型 ----------
+;;; 依你的電腦修改這三個路徑 (見 bridge/README)
+(if (not *ac:python*) (setq *ac:python* "python"))
+(if (not *ac:bridge*) (setq *ac:bridge* "C:\\SketchConcept\\bridge\\sketchconcept_bridge.py"))
+(if (not *ac:repo*)   (setq *ac:repo*   "C:\\SketchConcept\\SketchConcept"))
+
+(defun ac:num (x) (rtos x 2 8))
+(defun ac:jpt (p) (strcat "[" (ac:num (car p)) "," (ac:num (cadr p)) "]"))
+(defun ac:jprim (i / g)
+  (setq g (ac:g i))
+  (strcat "{\"type\":\"" (ac:ty i) "\",\"g\":["
+          (cond
+            ((= (ac:ty i) "Line") (strcat (ac:jpt (car g)) "," (ac:jpt (cadr g))))
+            ((= (ac:ty i) "Arc")
+             (strcat (ac:jpt (nth 0 g)) "," (ac:num (nth 1 g)) "," (ac:jpt (nth 2 g)) ","
+                     (ac:jpt (nth 3 g)) "," (ac:jpt (nth 4 g))))
+            ((= (ac:ty i) "Circle") (strcat (ac:jpt (car g)) "," (ac:num (cadr g))))
+            (T (ac:jpt (car g))))
+          "]}")
+)
+(defun ac:jcons (c)
+  (strcat "[\"" (car c) "\"," (ac:join (mapcar 'itoa (cdr c)) ",") "]")
+)
+
+(defun ac:files (/ base)
+  (setq base (strcat (getvar "DWGPREFIX") (vl-filename-base (getvar "DWGNAME"))))
+  (list (strcat base "_sketch.json") (strcat base "_concepts.lsp"))
+)
+
+;; 把目前的 L0 草圖圖寫成 JSON
+(defun ac:export (path / f dz)
+  (if (setq f (open path "w"))
+    (progn
+      ;; DIMZIN 會讓 rtos 省略前導零 (.5)，JSON 不接受
+      (setq dz (getvar "DIMZIN"))
+      (setvar "DIMZIN" 0)
+      (write-line "{\"prims\":[" f)
+      (write-line (ac:join (mapcar 'ac:jprim (ac:range (length *ac:P*))) ",\n") f)
+      (write-line "],\"constraints\":[" f)
+      (write-line (ac:join (mapcar 'ac:jcons *ac:C*) ",\n") f)
+      (write-line "]}" f)
+      (close f)
+      (setvar "DIMZIN" dz)
+      path))
+)
+
+;; 讀回模型結果: 每行 (圖元編號 實例編號 概念庫編號)
+(defun ac:import (path / f l x e)
+  (setq *ac:MK* nil)
+  (if (setq f (open path "r"))
+    (progn
+      (while (setq l (read-line f))
+        (if (= (substr l 1 1) "(")
+          (progn
+            (setq x (read l))
+            (if (setq e (assoc (cadr x) *ac:MK*))
+              (setq *ac:MK* (subst (list (car e) (cadr e) (append (caddr e) (list (car x)))) e *ac:MK*))
+              (setq *ac:MK* (append *ac:MK* (list (list (cadr x) (caddr x) (list (car x))))))))))
+      (close f)
+      T))
+)
+
+(defun ac:sameset (a b)
+  (and (= (length a) (length b)) (vl-every '(lambda (i) (member i b)) a))
+)
+
+;; 顯示模型的分解結果，並與規則版概念比對
+(defun ac:showmodel (/ k rule n)
+  (princ (strcat "\n===== 預訓練模型的概念分解: " (itoa (length *ac:MK*)) " 個概念實例 ====="))
+  (setq k 0 n 0)
+  (foreach m *ac:MK*
+    (setq rule (vl-some '(lambda (c) (if (ac:sameset (caddr m) (cadr c)) (car c))) *ac:K*))
+    (if rule (setq n (1+ n)))
+    (princ (strcat "\n  實例 " (itoa (car m)) ": 概念庫 #" (itoa (cadr m))
+                   "，" (itoa (length (caddr m))) " 個圖元 ("
+                   (ac:join (mapcar 'ac:ty (caddr m)) ",") ")"
+                   (if rule (strcat "  = 規則版 T_" rule) "")))
+    (foreach i (caddr m) (ac:drawprim i (1+ (rem k 6))))
+    (setq k (1+ k)))
+  (princ (strcat "\n與規則版概念完全一致: " (itoa n) " / " (itoa (length *ac:MK*))))
+  (princ "\n圖面上已依模型的概念上色，輸入 REDRAW 清除。")
+)
+
+(defun c:ACEXPORT (/ ss fs)
+  (princ "\n選取要匯出給預訓練模型的圖形:")
+  (if (setq ss (ssget *ac:filter*))
+    (progn
+      (ac:build ss)
+      (setq fs (ac:files))
+      (if (ac:export (car fs))
+        (princ (strcat "\n已匯出 " (itoa (length *ac:P*)) " 個圖元、" (itoa (length *ac:C*))
+                       " 個約束: " (car fs)
+                       "\n執行 Python 後用 ACIMPORT 讀回 (期間不要重新選取其他圖形)")))))
+  (princ)
+)
+
+(defun c:ACIMPORT (/ fs)
+  (setq fs (ac:files))
+  (cond
+    ((not *ac:P*) (princ "\n請先執行 ACEXPORT 或 ACMODEL。"))
+    ((ac:import (cadr fs)) (ac:showmodel))
+    (T (princ (strcat "\n找不到結果檔: " (cadr fs)))))
+  (princ)
+)
+
+;; 匯出 → 呼叫 Python 執行模型 (等待結束) → 讀回並顯示
+(defun c:ACMODEL (/ ss fs sh rc)
+  (princ "\n選取要用預訓練模型解讀的圖形:")
+  (if (setq ss (ssget *ac:filter*))
+    (progn
+      (ac:build ss)
+      (setq fs (ac:files))
+      (ac:export (car fs))
+      (if (findfile (cadr fs)) (vl-file-delete (cadr fs)))
+      (princ "\n執行預訓練模型中 (CPU，約數秒到一分鐘)...")
+      (setq sh (vlax-create-object "WScript.Shell")
+            rc (vlax-invoke-method sh 'Run
+                 (strcat "\"" *ac:python* "\" \"" *ac:bridge* "\" --repo \"" *ac:repo* "\" \""
+                         (car fs) "\" \"" (cadr fs) "\"")
+                 1 :vlax-true))
+      (vlax-release-object sh)
+      (if (ac:import (cadr fs))
+        (ac:showmodel)
+        (princ (strcat "\nPython 執行失敗 (代碼 " (itoa rc) ")。請檢查 *ac:python*、*ac:bridge*、*ac:repo* 的路徑，"
+                       "或手動執行: python sketchconcept_bridge.py --repo ... \"" (car fs) "\" \"" (cadr fs) "\"")))))
+  (princ)
+)
+
+(princ "\n自動標註已載入。指令: AUTODIM、ADIMTOTAL、ACLIST (解讀設計概念)、ACDIM (依概念標註)、ACCOMPLETE (概念補全)、ACMODEL / ACEXPORT / ACIMPORT (預訓練模型)")
 (princ)

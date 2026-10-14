@@ -1,5 +1,5 @@
 """Minimal AutoLISP interpreter + AutoCAD ActiveX mocks, for testing autodim.lsp offline."""
-import math, fnmatch, re, sys
+import math, fnmatch, re, sys, os
 
 class Sym(str):
     pass
@@ -217,7 +217,7 @@ BUILTIN.update({
     'angle': lambda p, q: math.atan2(q[1] - p[1], q[0] - p[0]) % (2 * math.pi),
     'polar': lambda p, a, d: [p[0] + d * math.cos(a), p[1] + d * math.sin(a)] + list(p[2:3]),
     'strcat': lambda *a: ''.join(a), 'itoa': lambda i: str(int(i)),
-    'rtos': lambda x, m=2, p=4: f"{x:.{p}f}",
+    'rtos': lambda x, m=2, p=4: (lambda t: re.sub(r'^(-?)0\.', r'\1.', t) if VARS.get('DIMZIN', 0) & 4 else t)(f"{x:.{p}f}"),
     'strcase': lambda s, low=None: s.lower() if low else s.upper(),
     'wcmatch': lambda s, pat: T if any(fnmatch.fnmatchcase(s, p) for p in pat.split(',')) else None,
     'vl-load-com': lambda: None, 'vl-filename-base': lambda s: s.rsplit('.', 1)[0],
@@ -318,13 +318,25 @@ def mkdim(kind):
 def getbb(o, sa, sb):
     mn, mx = bbox(o); ENV[sa] = mn; ENV[sb] = mx
 
-VARS = {'TILEMODE': 1, 'CVPORT': 2, 'DIMSCALE': 1.0, 'DIMTXT': 2.5, 'DWGPREFIX': '', 'DWGNAME': 'test.dwg', 'VIEWSIZE': 100.0}
+VARS = {'TILEMODE': 1, 'CVPORT': 2, 'DIMSCALE': 1.0, 'DIMTXT': 2.5, 'DWGPREFIX': '', 'DWGNAME': 'test.dwg', 'VIEWSIZE': 100.0, 'DIMZIN': 8}
 
 class FakeFile:
     def __init__(s, p): s.p = p; s.lines = []
 FILES = {}
-def _open(p, m): f = FakeFile(p); FILES[p] = f; return f
-def _wl(l, f): f.lines.append(l); return l
+def _open(p, m):
+    if m == 'r':
+        if not os.path.exists(p): return None
+        f = FakeFile(p); f.lines = open(p, encoding='utf-8').read().splitlines(); f.pos = 0; return f
+    f = FakeFile(p); FILES[p] = f; return f
+def _wl(l, f):
+    f.lines.append(l)
+    with open(f.p, 'w', encoding='utf-8') as h: h.write('\n'.join(f.lines) + '\n')
+    return l
+def _rl(f):
+    if f.pos >= len(f.lines): return None
+    f.pos += 1; return f.lines[f.pos - 1]
+def _read(s):
+    r = parse(tokenize(s)); return r[0] if r else None
 
 BUILTIN.update({
     'vlax-ename->vla-object': lambda e: e, 'vla-get-objectname': lambda e: e.kind,
@@ -350,7 +362,10 @@ BUILTIN.update({
     'getvar': lambda v: VARS[v.upper()], 'getkword': lambda *a: 'N', 'getdist': lambda *a: None,
     'ssget': lambda *a: (list(SEL) if SEL else None), 'sslength': lambda s: len(s), 'ssname': lambda s, i: s[i],
     'grdraw': lambda p, q, c, h=None: GRDRAW.append((p, q, c)),
-    'open': _open, 'write-line': _wl, 'close': lambda f: None,
+    'open': _open, 'write-line': _wl, 'close': lambda f: None, 'read-line': _rl, 'read': _read,
+    'substr': lambda s, i, n=None: s[i - 1:] if n is None else s[i - 1:i - 1 + n],
+    'setvar': lambda v, x: VARS.__setitem__(v.upper(), x), 'findfile': lambda p: p if os.path.exists(p) else None,
+    'vl-file-delete': lambda p: (os.remove(p), T)[1] if os.path.exists(p) else None,
 })
 
 def load(path):

@@ -12,6 +12,10 @@
 | `ACLIST` | **設計意圖解讀**：把草圖分解成設計概念，依概念上色 (REDRAW 清除)，輸出 DSL 程式與模組化程度 |
 | `ACDIM` | **依設計概念標註**：每個概念只標它的參數，重複的實例合併 |
 | `ACCOMPLETE` | **以概念自動補全**：補上缺一邊的矩形、缺一端的長槽孔（畫在紅色圖層 `AC_COMPLETION`） |
+| `ACMODEL` | 用**論文作者的預訓練模型**（外部 Python）解讀草圖，依模型的概念上色，並和規則版比對 |
+| `ACEXPORT` / `ACIMPORT` | 同上，分成匯出 / 讀回兩步，中間手動執行 Python |
+
+預訓練模型的安裝與使用見 [`bridge/README.md`](bridge/README.md)。
 
 ## 與論文的對應
 
@@ -29,8 +33,9 @@ Yuezhi Yang, Hao Pan, *Discovering Design Concepts for CAD Sketches*, NeurIPS 20
 | 概念是「參數化結構」(Sec. 3) | `ACDIM`：依概念參數標註 |
 | 自動補全 (Sec. 6.2, Fig. 5) | `ACCOMPLETE`：以概念為單位補全 |
 
-**不同之處**：論文用 transformer + 向量量化從 SketchGraphs（約 100 萬張草圖）**學出**概念庫；
-預訓練模型需要 PyTorch/CUDA，無法在 AutoCAD 內執行。本程式的概念庫是**人工寫定**的，
+**不同之處**：論文用 transformer + 向量量化從 SketchGraphs（約 100 萬張草圖）**學出**概念庫。
+`ACLIST`/`ACDIM`/`ACCOMPLETE` 用的是**人工寫定**的概念庫（不需安裝任何東西）；
+`ACMODEL` 則在 AutoCAD 外用 Python 執行作者的預訓練模型（見 `bridge/`）。人工概念庫
 挑選的概念仿照論文中學到的結果（矩形 Fig. 4、line-arcs/長槽孔 Fig. 1、對齊平行線 Fig. 3）。
 
 ### 概念庫
@@ -56,6 +61,7 @@ Yuezhi Yang, Hao Pan, *Discovering Design Concepts for CAD Sketches*, NeurIPS 20
 ```
 python3 tests/test_autodim.py        # 35 個情境：概念偵測、標註、補全、DSL 輸出
 python3 tests/parencheck.py autodim.lsp
+SKETCHCONCEPT_REPO=... SKETCHCONCEPT_PYTHON=... python3 tests/test_bridge.py   # 匯出 → 作者網路 → 讀回
 ```
 
 模擬環境不等於真正的 AutoCAD，請先在測試圖上試用。

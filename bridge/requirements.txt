@@ -1,0 +1,7 @@
+torch==2.2.2
+numpy<2
+scipy
+networkx
+tensorboard
+matplotlib
+lz4
