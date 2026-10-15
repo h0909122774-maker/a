@@ -29,10 +29,13 @@ COM 部分用 comtypes 的早期繫結：每個物件都先用 GetBestInterface
 import argparse
 import array
 import math
+import sys
 import time
 import traceback
 
 import comtypes.client
+import comtypes.client.dynamic
+from comtypes.automation import IDispatch
 from comtypes import COMError
 
 # ---------------- 可調整的設定 ----------------
@@ -76,6 +79,39 @@ def typed(obj):
         return comtypes.client.GetBestInterface(obj)
     except Exception:
         return obj
+
+
+# 每種物件對應的 AutoCAD 介面
+INTERFACES = {
+    "AcDbLine": "IAcadLine",
+    "AcDbCircle": "IAcadCircle",
+    "AcDbArc": "IAcadArc",
+    "AcDbPoint": "IAcadPoint",
+    "AcDbPolyline": "IAcadLWPolyline",
+}
+
+
+def acad_typelib():
+    """comtypes 為 AutoCAD 產生的型別庫模組（連線時自動產生）。"""
+    for mod_name, mod in list(sys.modules.items()):
+        if mod_name.startswith("comtypes.gen.") and hasattr(mod, "IAcadCircle"):
+            return mod
+    return None
+
+
+def as_entity(ent, name):
+    """把 space.Item() 拿到的 IAcadEntity 明確轉成 IAcadCircle、IAcadLine 等介面。"""
+    lib = acad_typelib()
+    iface = getattr(lib, INTERFACES[name], None) if lib else None
+    if iface is not None:
+        try:
+            return ent.QueryInterface(iface)
+        except Exception as e:
+            if VERBOSE:
+                print(f"QueryInterface({iface.__name__}) 失敗: {e!r}，改用動態呼叫")
+    elif VERBOSE:
+        print("找不到 AutoCAD 型別庫模組，改用動態呼叫")
+    return comtypes.client.dynamic.Dispatch(ent.QueryInterface(IDispatch))
 
 
 def ensure_layer(doc):
@@ -163,7 +199,7 @@ def active_space(doc):
 
 def process_range(space, start, end, done):
     for i in range(start, end):
-        ent = typed(retry(space.Item, i))
+        ent = retry(space.Item, i)
         handle, name, layer = retry(lambda: (ent.Handle, ent.ObjectName, ent.Layer))
         if handle in done:
             continue
@@ -173,6 +209,7 @@ def process_range(space, start, end, done):
                 print(f"略過 {name}（不支援的物件類型）")
             continue
         try:
+            ent = as_entity(ent, name)
             dims = retry(HANDLERS[name], space, ent)
             for d in dims:
                 d.Layer = DIM_LAYER
