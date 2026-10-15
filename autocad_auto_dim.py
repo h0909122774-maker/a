@@ -651,6 +651,36 @@ class Annotator:
         views.sort(key=lambda v: (-v[0][3], v[0][0]))   # 由上到下、由左到右
         return views
 
+    def chain_dims(self, rounds, box, size, horizontal):
+        """孔中心位置的串連尺寸：水平方向標在視圖下方，垂直方向標在視圖右方。"""
+        x0, y0, x1, y1 = box
+        if not rounds:
+            return []
+        off = self.k(LINE_OFFSET)
+        merge = size * 0.005
+        if horizontal:
+            stops = [(x0, (x0, y0)), (x1, (x1, y0))]
+            stops += [(e.Center[0], (e.Center[0], e.Center[1])) for _, e, _ in rounds]
+        else:
+            stops = [(y0, (x1, y0)), (y1, (x1, y1))]
+            stops += [(e.Center[1], (e.Center[0], e.Center[1])) for _, e, _ in rounds]
+        stops.sort(key=lambda t: t[0])
+        uniq = []
+        for v, p in stops:
+            if not uniq or v - uniq[-1][0] > merge:
+                uniq.append((v, p))
+        if len(uniq) <= 2:
+            return []      # 和總長/總高一樣，不用另外標
+        dims = []
+        for (va, pa), (vb, pb) in zip(uniq, uniq[1:]):
+            if horizontal:
+                dims.append(call(self.space, "AddDimRotated", apt(*pa), apt(*pb),
+                                 apt((va + vb) / 2, y0 - off), 0.0))
+            else:
+                dims.append(call(self.space, "AddDimRotated", apt(*pa), apt(*pb),
+                                 apt(x1 + off, (va + vb) / 2), math.pi / 2))
+        return dims
+
     def annotate_views(self):
         """三視圖標註：每個視圖標總長、總高、主要線段長度、圓的直徑與中心線。"""
         views = self.find_views()
@@ -663,13 +693,20 @@ class Annotator:
             off = self.k(LINE_OFFSET)
             dims = []
             try:
-                # 總長（下方）、總高（左方）
+                rounds = [self.round_items[h] for _, kind, h in members if kind == "round"]
+                # 孔位置的串連尺寸（像 40 | 45 | 12 這樣，從邊到各孔中心）
+                chain_x = self.chain_dims(rounds, (x0, y0, x1, y1), size, horizontal=True)
+                chain_y = self.chain_dims(rounds, (x0, y0, x1, y1), size, horizontal=False)
+                dims += chain_x + chain_y
+                # 總長（下方）、總高（左方），有串連尺寸時放在更外面一層
+                ox = off * (2 if chain_x else 1)
+                oy = off * (2 if chain_y else 1)
                 if x1 - x0 > TOL:
                     dims.append(call(self.space, "AddDimRotated", apt(x0, y0), apt(x1, y0),
-                                     apt((x0 + x1) / 2, y0 - off), 0.0))
+                                     apt((x0 + x1) / 2, y0 - ox), 0.0))
                 if y1 - y0 > TOL:
                     dims.append(call(self.space, "AddDimRotated", apt(x0, y0), apt(x0, y1),
-                                     apt(x0 - off, (y0 + y1) / 2), math.pi / 2))
+                                     apt(x0 - oy, (y0 + y1) / 2), math.pi / 2))
                 # 主要線段：同一視圖裡相同方向、相同長度的只標一次，太短的不標
                 seen = set()
                 for _, kind, sid in members:
@@ -687,16 +724,23 @@ class Annotator:
                         continue
                     seen.add(key)
                     dims += self.dim_segment(sid)
-                # 圓與弧：同一視圖相同半徑只標一次，中心線每個都畫
+                # 圓與弧：同一視圖相同大小只標一次；有好幾個時寫成「4X Ø6」
+                counts = {}
+                for name, ent, _ in rounds:
+                    key = (name, round(ent.Radius, 4))
+                    counts[key] = counts.get(key, 0) + 1
                 seen_r = set()
-                for _, kind, handle in members:
-                    if kind != "round":
-                        continue
-                    name, ent, _ = self.round_items[handle]
-                    r = round(ent.Radius, 4)
-                    if (name, r) not in seen_r:
-                        seen_r.add((name, r))
-                        dims += self.dim_circle(ent) if name == "AcDbCircle" else self.dim_arc(ent)
+                for name, ent, _ in rounds:
+                    key = (name, round(ent.Radius, 4))
+                    if key not in seen_r:
+                        seen_r.add(key)
+                        if name == "AcDbCircle":
+                            d = self.dim_circle(ent)[0]
+                            if counts[key] > 1:
+                                put(d, "TextOverride", f"{counts[key]}X%%c<>")
+                        else:
+                            d = self.dim_arc(ent)[0]
+                        dims.append(d)
                     if name == "AcDbCircle":
                         self.centerline(ent.Center, ent.Radius)
                 for d in dims:
