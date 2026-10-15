@@ -144,6 +144,60 @@ def cast(obj, iface_name):
     return comtypes.client.dynamic.Dispatch(obj.QueryInterface(IDispatch))
 
 
+# 在某些 AutoCAD 版本上，模型空間的 AddDimDiameter 等方法用名稱找不到
+# (AttributeError / NameError)。這時改從物件自己的型別資訊查出 DISPID，
+# 直接用 IDispatch.Invoke 呼叫，不經過名稱查詢。
+DISPATCH_METHOD = 1
+DISPATCH_PROPERTYGET = 2
+DISPATCH_PROPERTYPUT = 4
+
+
+def _dispid(disp, name):
+    errors = []
+    try:
+        return disp.GetTypeInfo(0).GetIDsOfNames(name)[0]
+    except Exception as e:
+        errors.append(e)
+    try:
+        return disp.GetIDsOfNames(name)[0]
+    except Exception as e:
+        errors.append(e)
+    raise AttributeError(f"{name}（型別資訊和名稱查詢都找不到: {errors!r}）")
+
+
+def _invoke(obj, name, kind, *args):
+    disp = obj.QueryInterface(IDispatch)
+    return disp.Invoke(_dispid(disp, name), *args, _invkind=kind)
+
+
+def call(obj, method, *args):
+    """呼叫 COM 方法，例如 call(space, "AddDimDiameter", p1, p2, 5.0)。"""
+    try:
+        fn = getattr(obj, method)
+    except (AttributeError, NameError) as e:
+        log(f"{method} 無法直接呼叫 ({e!r})，改用 IDispatch.Invoke")
+        return _invoke(obj, method, DISPATCH_METHOD, *args)
+    return fn(*args)
+
+
+def put(obj, prop, value):
+    """設定 COM 屬性，例如 put(dim, "Layer", "AUTO_DIM")。"""
+    try:
+        setattr(obj, prop, value)
+    except (AttributeError, NameError) as e:
+        log(f"設定 {prop} 失敗 ({e!r})，改用 IDispatch.Invoke")
+        _invoke(obj, prop, DISPATCH_PROPERTYPUT, value)
+
+
+def get(obj, prop):
+    """讀取 COM 屬性。"""
+    try:
+        return getattr(obj, prop)
+    except (AttributeError, NameError) as e:
+        log(f"讀取 {prop} 失敗 ({e!r})，改用 IDispatch.Invoke")
+        return _invoke(obj, prop, DISPATCH_PROPERTYGET)
+
+
 # ---------------- 圖層與線型 ----------------
 
 def ensure_linetype(doc, name):
@@ -267,7 +321,7 @@ class Annotator:
                 out += self.dim_angles(space, seg)
             self.segments.append(seg)
         for d in out:
-            d.Layer = DIM_LAYER
+            put(d, "Layer", DIM_LAYER)
 
     @staticmethod
     def poly_segments(ent):
@@ -290,7 +344,7 @@ class Annotator:
         nx, ny = -d[1], d[0]
         tx = (p1[0] + p2[0]) / 2 + nx * LINE_OFFSET
         ty = (p1[1] + p2[1]) / 2 + ny * LINE_OFFSET
-        return [space.AddDimAligned(apt(p1[0], p1[1]), apt(p2[0], p2[1]), apt(tx, ty))]
+        return [call(space, "AddDimAligned", apt(p1[0], p1[1]), apt(p2[0], p2[1]), apt(tx, ty))]
 
     @staticmethod
     def dim_circle(space, ent):
@@ -299,7 +353,7 @@ class Annotator:
         a = math.radians(45)
         p1 = apt(cx + r * math.cos(a), cy + r * math.sin(a))
         p2 = apt(cx - r * math.cos(a), cy - r * math.sin(a))
-        return [space.AddDimDiameter(p1, p2, CIRCLE_LEADER)]
+        return [call(space, "AddDimDiameter", p1, p2, CIRCLE_LEADER)]
 
     @staticmethod
     def dim_arc(space, ent):
@@ -308,13 +362,13 @@ class Annotator:
         start, end = ent.StartAngle, ent.EndAngle
         mid = start + ((end - start) % (2 * math.pi)) / 2
         chord = apt(cx + r * math.cos(mid), cy + r * math.sin(mid))
-        return [space.AddDimRadial(apt(cx, cy), chord, CIRCLE_LEADER)]
+        return [call(space, "AddDimRadial", apt(cx, cy), chord, CIRCLE_LEADER)]
 
     @staticmethod
     def dim_point(space, ent):
         x, y = ent.Coordinates[0], ent.Coordinates[1]
-        dim_x = space.AddDimOrdinate(apt(x, y), apt(x, y + POINT_LEADER), True)   # X 座標
-        dim_y = space.AddDimOrdinate(apt(x, y), apt(x + POINT_LEADER, y), False)  # Y 座標
+        dim_x = call(space, "AddDimOrdinate", apt(x, y), apt(x, y + POINT_LEADER), True)   # X 座標
+        dim_y = call(space, "AddDimOrdinate", apt(x, y), apt(x + POINT_LEADER, y), False)  # Y 座標
         return [dim_x, dim_y]
 
     def centerline(self, space, center, r):
@@ -327,13 +381,13 @@ class Annotator:
         lt_scale = max(2 * half / (self.ltscale_base * 2), 0.01)
         for (x1, y1, x2, y2) in ((cx - half, cy, cx + half, cy),
                                  (cx, cy - half, cx, cy + half)):
-            line = space.AddLine(apt(x1, y1), apt(x2, y2))
-            line.Layer = CENTER_LAYER
+            line = call(space, "AddLine", apt(x1, y1), apt(x2, y2))
+            put(line, "Layer", CENTER_LAYER)
             try:
-                line.LinetypeScale = lt_scale
+                put(line, "LinetypeScale", lt_scale)
             except Exception:
                 pass
-            self.done.add(line.Handle)
+            self.done.add(get(line, "Handle"))
 
     def dim_angles(self, space, seg):
         """新線段的每個端點，和相接的線段之間加角度標註。"""
@@ -382,7 +436,7 @@ class Annotator:
         radius = min(ANGLE_RADIUS, 0.4 * min(len_a, len_b))
         bis = unit(ua[0] + ub[0], ua[1] + ub[1])
         tx, ty = vertex[0] + bis[0] * radius, vertex[1] + bis[1] * radius
-        return space.AddDim3PointAngular(
+        return call(space, "AddDim3PointAngular",
             apt(vertex[0], vertex[1]),
             apt(ray_a[2][0], ray_a[2][1]),
             apt(ray_b[2][0], ray_b[2][1]),
