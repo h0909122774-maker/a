@@ -28,6 +28,8 @@ AutoCAD 自動標註 (Python + COM)
     python autocad_auto_dim.py 圖檔.dwg         # 開啟圖檔 -> 全部標註 -> 另存成「圖檔_標註.dwg」-> 繼續監看
     python autocad_auto_dim.py 圖檔.dwg --once  # 同上，但標完就結束
     python autocad_auto_dim.py a.dwg b.dwg --once   # 一次處理多個圖檔
+    python autocad_auto_dim.py --views         # 三視圖：目前圖面每個視圖標總長、總高、主要尺寸
+    python autocad_auto_dim.py 圖檔.dwg --views # 三視圖：讀圖檔標註後另存
     python autocad_auto_dim.py --text 5        # 指定標註字高為 5（不指定就依圖形大小自動決定）
 
     其他參數:
@@ -72,6 +74,8 @@ CENTER_EXTEND = 1.5           # 中心線超出圓的長度
 DIM_ANGLES = True             # 是否標註相接兩線的角度
 SKIP_RIGHT_ANGLE = True       # True: 90 度不標（改 False 就連直角也標）
 DRAW_CENTERLINES = True       # 是否幫圓/弧畫中心線
+VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
+VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 SAVE_SUFFIX = "_標註"          # 讀圖檔標註後另存的檔名後綴
 POLL_INTERVAL = 0.3           # 每幾秒檢查一次新物件
 WAIT_FOR_COMMAND_END = True   # True: 等指令(如 LINE)結束後才標註，避免干擾繪圖
@@ -313,6 +317,7 @@ class Annotator:
         self.pt_index = {}         # 端點 -> 接在這點的線段 id
         self.angle_keys = set()    # 已標過的角度 (頂點, 兩段 id)
         self.bbox = None           # 圖形範圍 (xmin, ymin, xmax, ymax)
+        self.round_items = {}      # 圓/弧 handle -> (物件名, 物件, 外框)
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
@@ -394,6 +399,7 @@ class Annotator:
                 self.add_segment(f"{handle}:{k}", p1, p2)
         elif name in ("AcDbCircle", "AcDbArc"):
             c, r = ent.Center, ent.Radius
+            self.round_items[handle] = (name, ent, (c[0] - r, c[1] - r, c[0] + r, c[1] + r))
             self.grow_bbox(c[0] - r, c[1] - r, c[0] + r, c[1] + r)
         elif name == "AcDbPoint":
             c = ent.Coordinates
@@ -589,6 +595,122 @@ class Annotator:
             dims.append(d)
         return dims
 
+    # ---- 三視圖 ----
+    def find_views(self):
+        """把相連或重疊的線/圓分成一群一群，每一群就是一個視圖（前視、俯視、側視…）。"""
+        boxes = []   # (外框, 種類, id)
+        for sid, (p1, p2) in self.segments.items():
+            boxes.append(((min(p1[0], p2[0]), min(p1[1], p2[1]),
+                           max(p1[0], p2[0]), max(p1[1], p2[1])), "seg", sid))
+        for handle, (_, _, box) in self.round_items.items():
+            boxes.append((box, "round", handle))
+        if not boxes:
+            return []
+        b = self.bbox
+        gap = max(b[2] - b[0], b[3] - b[1]) * VIEW_GAP_RATIO
+        parent = list(range(len(boxes)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        order = sorted(range(len(boxes)), key=lambda i: boxes[i][0][0])
+        for a_pos, i in enumerate(order):     # 依 x 排序，只比對 x 範圍重疊的
+            bi = boxes[i][0]
+            for j in order[a_pos + 1:]:
+                bj = boxes[j][0]
+                if bj[0] > bi[2] + gap:
+                    break
+                if bj[1] <= bi[3] + gap and bi[1] <= bj[3] + gap:
+                    parent[find(i)] = find(j)
+        groups = {}
+        for i in range(len(boxes)):
+            groups.setdefault(find(i), []).append(boxes[i])
+        views = []
+        for members in groups.values():
+            x0 = min(m[0][0] for m in members); y0 = min(m[0][1] for m in members)
+            x1 = max(m[0][2] for m in members); y1 = max(m[0][3] for m in members)
+            views.append(((x0, y0, x1, y1), members))
+        # 在外框裡面、沒碰到外框線的東西（例如矩形中間的孔）併進同一個視圖
+        merged = True
+        while merged:
+            merged = False
+            for i in range(len(views)):
+                for j in range(i + 1, len(views)):
+                    a, b2 = views[i][0], views[j][0]
+                    if a[0] <= b2[2] and b2[0] <= a[2] and a[1] <= b2[3] and b2[1] <= a[3]:
+                        box = (min(a[0], b2[0]), min(a[1], b2[1]), max(a[2], b2[2]), max(a[3], b2[3]))
+                        views[i] = (box, views[i][1] + views[j][1])
+                        del views[j]
+                        merged = True
+                        break
+                if merged:
+                    break
+        views.sort(key=lambda v: (-v[0][3], v[0][0]))   # 由上到下、由左到右
+        return views
+
+    def annotate_views(self):
+        """三視圖標註：每個視圖標總長、總高、主要線段長度、圓的直徑與中心線。"""
+        views = self.find_views()
+        print(f"找到 {len(views)} 個視圖")
+        for n, ((x0, y0, x1, y1), members) in enumerate(views, 1):
+            size = max(x1 - x0, y1 - y0)
+            if size <= TOL:
+                continue
+            self.use_height(self.height_for(size))
+            off = self.k(LINE_OFFSET)
+            dims = []
+            try:
+                # 總長（下方）、總高（左方）
+                if x1 - x0 > TOL:
+                    dims.append(call(self.space, "AddDimRotated", apt(x0, y0), apt(x1, y0),
+                                     apt((x0 + x1) / 2, y0 - off), 0.0))
+                if y1 - y0 > TOL:
+                    dims.append(call(self.space, "AddDimRotated", apt(x0, y0), apt(x0, y1),
+                                     apt(x0 - off, (y0 + y1) / 2), math.pi / 2))
+                # 主要線段：同一視圖裡相同方向、相同長度的只標一次，太短的不標
+                seen = set()
+                for _, kind, sid in members:
+                    if kind != "seg":
+                        continue
+                    p1, p2 = self.segments[sid]
+                    length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+                    if length < size * VIEW_MIN_SEGMENT or abs(length - (x1 - x0)) < TOL \
+                            and abs(p1[1] - p2[1]) < TOL or abs(length - (y1 - y0)) < TOL \
+                            and abs(p1[0] - p2[0]) < TOL:
+                        continue   # 太短，或和總長/總高重複
+                    direction = round(math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0])) % 180, 1)
+                    key = (round(length, 4), direction)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    dims += self.dim_segment(sid)
+                # 圓與弧：同一視圖相同半徑只標一次，中心線每個都畫
+                seen_r = set()
+                for _, kind, handle in members:
+                    if kind != "round":
+                        continue
+                    name, ent, _ = self.round_items[handle]
+                    r = round(ent.Radius, 4)
+                    if (name, r) not in seen_r:
+                        seen_r.add((name, r))
+                        dims += self.dim_circle(ent) if name == "AcDbCircle" else self.dim_arc(ent)
+                    if name == "AcDbCircle":
+                        self.centerline(ent.Center, ent.Radius)
+                for d in dims:
+                    put(d, "Layer", DIM_LAYER)
+                    try:
+                        put(d, "ScaleFactor", self.scale)
+                    except Exception as e:
+                        log(f"設定標註比例失敗: {e!r}")
+                print(f"視圖 {n}: {x1 - x0:g} × {y1 - y0:g}，{len(dims)} 個標註，字高 {self.h:g}")
+            except Exception as e:
+                print(f"視圖 {n} 標註失敗: {e!r}")
+                if VERBOSE:
+                    traceback.print_exc()
+
     def centerline(self, center, r):
         """畫十字中心線（水平 + 垂直），放在中心線圖層。"""
         if not DRAW_CENTERLINES:
@@ -681,14 +803,18 @@ def open_drawing(acad, path):
     return d
 
 
-def annotate_file(acad, path, save, text_height):
+def annotate_file(acad, path, save, text_height, views=False):
     print(f"開啟圖檔: {path}")
     doc = open_drawing(acad, path)
     space = cast(doc.ModelSpace, "IAcadModelSpace")
     count = space.Count
     print(f"模型空間共有 {count} 個物件，開始標註…")
     ann = Annotator(doc, space, text_height)
-    ann.scan(0, count)
+    if views:
+        ann.scan(0, count, annotate=False)
+        ann.annotate_views()
+    else:
+        ann.scan(0, count)
     if save:
         root, ext = os.path.splitext(os.path.abspath(path))
         out = f"{root}{SAVE_SUFFIX}{ext or '.dwg'}"
@@ -746,6 +872,8 @@ def main():
     parser.add_argument("--no-save", action="store_true", help="讀圖檔標註後不要另存")
     parser.add_argument("--now", action="store_true", help="不等指令結束，畫一段就標一段")
     parser.add_argument("-v", "--verbose", action="store_true", help="顯示除錯訊息")
+    parser.add_argument("--views", action="store_true",
+                        help="三視圖模式：每個視圖標總長、總高、主要尺寸，標完就結束")
     parser.add_argument("--text", type=float, help="標註字高（不指定就依圖形大小自動決定）")
     parser.add_argument("--diag", action="store_true", help="檢查 CAD 環境後結束（回報問題用）")
     args = parser.parse_args()
@@ -769,7 +897,7 @@ def main():
 
     for f in args.files:
         try:
-            doc, space, ann = annotate_file(acad, f, not args.no_save, args.text)
+            doc, space, ann = annotate_file(acad, f, not args.no_save, args.text, args.views)
             key = (doc.Name, space.Name)
             annotators[key] = ann
             counts[key] = space.Count
@@ -778,7 +906,13 @@ def main():
             if VERBOSE:
                 traceback.print_exc()
 
-    if args.once:
+    if args.views and not args.files:
+        doc = cast(acad.ActiveDocument, "IAcadDocument")
+        space = active_space(doc)
+        ann = Annotator(doc, space, args.text)
+        ann.scan(0, space.Count, annotate=False)
+        ann.annotate_views()
+    if args.once or args.views:
         print("完成。")
         return
 
