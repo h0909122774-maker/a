@@ -63,8 +63,8 @@ HIDDEN_LAYER = "虛線"          # 虛線圖層（線型 HIDDEN）
 TEXT_RATIO = 1 / 40           # 整張圖的基準字高 = 圖形大小 × 這個比例
 SIZE_BY_OBJECT = True         # True: 字高跟著每個物件的大小變（大物件大字、小物件小字）
 OBJECT_TEXT_RATIO = 1 / 10    # 物件字高 = 物件大小 × 這個比例（字太小就調大，例如 1/6）
-MIN_TEXT_FACTOR = 0.3         # 物件字高最小不小於基準字高的幾倍（避免小東西的字小到看不見）
-MAX_TEXT_FACTOR = 3.0         # 物件字高最大不超過基準字高的幾倍
+MIN_TEXT_FACTOR = 0.1         # 物件字高最小不小於基準字高的幾倍（避免小東西的字小到看不見）
+MAX_TEXT_FACTOR = 10.0        # 物件字高最大不超過基準字高的幾倍
 # 以下距離都以「字高」為單位，會跟著字高一起縮放
 LINE_OFFSET = 2.5             # 長度標註離線的距離
 POINT_LEADER = 4.0            # 點座標標註的引線長度
@@ -502,6 +502,18 @@ class Annotator:
             if VERBOSE:
                 traceback.print_exc()
 
+    def purge_own(self):
+        """刪掉這個空間裡本程式之前畫的標註和中心線（AUTO_DIM、中心線圖層）。"""
+        removed = 0
+        for i in range(self.space.Count - 1, -1, -1):
+            ent = retry(self.space.Item, i)
+            if retry(lambda: ent.Layer) in OWN_LAYERS:
+                retry(ent.Delete)
+                removed += 1
+        self.done = set()
+        self.has_old_dims = False
+        return removed
+
     # ---- 刪除 / 修改後同步 ----
     def forget(self, handle):
         """刪掉這個物件的標註和中心線，並清掉它的幾何記錄。"""
@@ -530,6 +542,7 @@ class Annotator:
                 print(f"{name} (handle {handle}) 已刪除，一併刪除它的標註")
                 continue
             if new_sig != sig:
+                log(f"{name} (handle {handle}) 圖形改變: {sig} -> {new_sig}")
                 self.forget(handle)
                 retry(self.read_geometry, handle, name, ent)
                 self.annotate_one(handle, name, ent, verb="已更新標註")
@@ -1058,14 +1071,16 @@ def main():
                     new_ann = Annotator(doc, space, args.text)
                     annotators[key] = new_ann
                     # 既有物件：--all 就標註，否則只記錄（讓新線可以和舊線標角度）
-                    # 已經標過的圖（有 AUTO_DIM 標註）不再重複標
-                    do_all = args.all and count > 0 and not new_ann.has_old_dims
                     if args.all and new_ann.has_old_dims:
-                        print("這張圖已經有自動標註，略過既有物件（只標之後新畫的）")
-                    elif do_all:
+                        # 之前標過的標註和原物件已經對不起來（改圖、縮放時不會跟著變），
+                        # 所以先刪掉舊的自動標註/中心線，再全部重標並重新追蹤
+                        removed = new_ann.purge_own()
+                        print(f"刪除之前的自動標註 {removed} 個，重新標註…")
+                        count = space.Count
+                    elif args.all and count > 0:
                         print("標註圖上既有物件…")
-                    new_ann.scan(0, count, annotate=do_all)
-                    counts[key] = count
+                    new_ann.scan(0, count, annotate=args.all)
+                    counts[key] = space.Count
                 ann = annotators[key]
                 ann.space = space
 
