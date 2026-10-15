@@ -76,6 +76,8 @@ SKIP_RIGHT_ANGLE = True       # True: 90 度不標（改 False 就連直角也�
 DRAW_CENTERLINES = True       # 是否幫圓/弧畫中心線
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
+SYNC_CHANGES = True           # 刪除物件時一起刪標註、修改物件時重新標註
+CHECK_INTERVAL = 1.0          # 每幾秒檢查一次刪除/修改
 SAVE_SUFFIX = "_標註"          # 讀圖檔標註後另存的檔名後綴
 POLL_INTERVAL = 0.3           # 每幾秒檢查一次新物件
 WAIT_FOR_COMMAND_END = True   # True: 等指令(如 LINE)結束後才標註，避免干擾繪圖
@@ -299,6 +301,28 @@ def nice_number(x):
     return 10 ** (exp + 1)
 
 
+def owner(sid):
+    """線段 id（handle 或 handle:段號）所屬的物件 handle。"""
+    return str(sid).split(":")[0]
+
+
+def geometry_sig(name, ent):
+    """物件的幾何特徵；改過圖形之後這個值會不同。"""
+    def r(v):
+        return tuple(round(x, 6) for x in v)
+    if name == "AcDbLine":
+        return r(ent.StartPoint) + r(ent.EndPoint)
+    if name in ("AcDbCircle", "AcDbArc"):
+        extra = (round(ent.StartAngle, 6), round(ent.EndAngle, 6)) if name == "AcDbArc" else ()
+        return r(ent.Center) + (round(ent.Radius, 6),) + extra
+    if name == "AcDbPoint":
+        return r(ent.Coordinates)
+    if name == "AcDbPolyline":
+        return r(ent.Coordinates) + (bool(ent.Closed),)
+    lo, hi = call(ent, "GetBoundingBox")
+    return r(lo) + r(hi)
+
+
 def unit(dx, dy):
     length = math.hypot(dx, dy)
     return (dx / length, dy / length) if length > TOL else None
@@ -318,6 +342,9 @@ class Annotator:
         self.angle_keys = set()    # 已標過的角度 (頂點, 兩段 id)
         self.bbox = None           # 圖形範圍 (xmin, ymin, xmax, ymax)
         self.round_items = {}      # 圓/弧 handle -> (物件名, 物件, 外框)
+        self.created = {}          # 原物件 handle -> 本程式為它畫的標註/中心線
+        self.tracked = {}          # 原物件 handle -> (物件名, 幾何特徵)，用來偵測刪除/修改
+        self._made = []            # 標註一個物件時順便畫的中心線
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
@@ -450,21 +477,59 @@ class Annotator:
                 if "Dimension" not in name:
                     log(f"略過 {name}（不支援或本程式畫的物件）")
                 continue
+            self.annotate_one(handle, name, ent)
+
+    def annotate_one(self, handle, name, ent, verb="已標註"):
+        try:
+            h = self.height_for(retry(self.object_size, handle, name, ent))
+            self.use_height(h)
+            self._made = []
+            dims = retry(self.annotate_entity, handle, name, ent)
+            for d in dims:
+                put(d, "Layer", DIM_LAYER)
+                try:
+                    put(d, "ScaleFactor", self.scale)
+                except Exception as e:
+                    log(f"設定標註比例失敗: {e!r}")
+            self.created.setdefault(handle, []).extend(dims + self._made)
+            self.tracked[handle] = (name, geometry_sig(name, ent))
+            print(f"{verb} {name} (handle {handle}，字高 {h:g})")
+        except Exception as e:
+            print(f"標註失敗 {name} (handle {handle}): {e!r}")
+            if VERBOSE:
+                traceback.print_exc()
+
+    # ---- 刪除 / 修改後同步 ----
+    def forget(self, handle):
+        """刪掉這個物件的標註和中心線，並清掉它的幾何記錄。"""
+        for obj in self.created.pop(handle, []):
             try:
-                h = self.height_for(retry(self.object_size, handle, name, ent))
-                self.use_height(h)
-                dims = retry(self.annotate_entity, handle, name, ent)
-                for d in dims:
-                    put(d, "Layer", DIM_LAYER)
-                    try:
-                        put(d, "ScaleFactor", self.scale)
-                    except Exception as e:
-                        log(f"設定標註比例失敗: {e!r}")
-                print(f"已標註 {name} (handle {handle}，字高 {h:g})")
-            except Exception as e:
-                print(f"標註失敗 {name} (handle {handle}): {e!r}")
-                if VERBOSE:
-                    traceback.print_exc()
+                call(obj, "Delete")
+            except Exception:
+                pass            # 可能已經被刪了（例如兩條線共用的角度標註）
+        sids = [sid for sid in self.segments if owner(sid) == handle]
+        for sid in sids:
+            for p in self.segments.pop(sid):
+                self.pt_index.get(pt_key(p), set()).discard(sid)
+        self.angle_keys = {k for k in self.angle_keys if not (k[1] & set(sids))}
+        self.round_items.pop(handle, None)
+        self.tracked.pop(handle, None)
+
+    def check_changes(self):
+        """檢查標註過的物件有沒有被刪除或修改：刪除就一起刪標註，修改就重新標註。"""
+        for handle, (name, sig) in list(self.tracked.items()):
+            try:
+                ent = cast(retry(self.doc.HandleToObject, handle), iface_for(name))
+                new_sig = retry(geometry_sig, name, ent)
+            except Exception:
+                self.forget(handle)
+                self.done.discard(handle)
+                print(f"{name} (handle {handle}) 已刪除，一併刪除它的標註")
+                continue
+            if new_sig != sig:
+                self.forget(handle)
+                retry(self.read_geometry, handle, name, ent)
+                self.annotate_one(handle, name, ent, verb="已更新標註")
 
     def annotate_entity(self, handle, name, ent):
         out = []
@@ -772,6 +837,7 @@ class Annotator:
             except Exception:
                 pass
             self.done.add(get(line, "Handle"))
+            self._made.append(line)
 
     def dim_angles(self, sid):
         """這段線的兩個端點，和相接的線段之間加角度標註。"""
@@ -805,7 +871,12 @@ class Annotator:
                 if key in self.angle_keys:
                     continue
                 self.angle_keys.add(key)
-                dims.append(self.add_angle(vertex, a, b))
+                d = self.add_angle(vertex, a, b)
+                dims.append(d)
+                # 角度標註也掛在另一條線底下：那條線刪掉/修改時一起清掉
+                other = owner(b[3] if a[3] == sid else a[3])
+                if other != owner(sid):
+                    self.created.setdefault(other, []).append(d)
         return dims
 
     def add_angle(self, vertex, ray_a, ray_b):
@@ -962,6 +1033,7 @@ def main():
 
     print("開始監看新物件… (Ctrl+C 停止)")
     waiting = False
+    last_check = 0.0
     while True:
         try:
             doc = cast(acad.ActiveDocument, "IAcadDocument")
@@ -995,6 +1067,12 @@ def main():
                 elif count < last:
                     # 有物件被刪除（或 UNDO），重新設定基準
                     counts[key] = count
+
+                # 每隔一段時間檢查：刪掉的物件連標註一起刪、改過的物件重新標註
+                if SYNC_CHANGES and time.time() - last_check >= CHECK_INTERVAL:
+                    ann.check_changes()
+                    counts[key] = space.Count
+                    last_check = time.time()
 
         except KeyboardInterrupt:
             print("停止自動標註")
