@@ -21,9 +21,9 @@ AutoCAD 自動標註 (Python + COM)
        python autocad_auto_dim.py -v       # 顯示除錯訊息（沒標註時用來查原因）
     3. 在 AutoCAD 裡正常畫圖，按 Ctrl+C 停止腳本
 
-COM 部分採用和 pyautocad 相同的 comtypes 作法：
-新物件先用 GetBestInterface 轉成實際型別 (IAcadCircle、IAcadLine…)，
-才讀得到 Center、Radius、StartPoint 等屬性。
+COM 部分用 comtypes 的早期繫結：每個物件都先用 GetBestInterface
+轉成實際型別 (IAcadModelSpace、IAcadCircle、IAcadLine…) 再呼叫，
+不靠名稱查詢，非英文版 AutoCAD 也能用。
 """
 
 import argparse
@@ -158,7 +158,7 @@ HANDLERS = {
 
 def active_space(doc):
     """目前作用中的空間：模型空間或圖紙空間（配置）。"""
-    return doc.ModelSpace if doc.ActiveSpace == 1 else doc.PaperSpace
+    return typed(doc.ModelSpace if doc.ActiveSpace == 1 else doc.PaperSpace)
 
 
 def process_range(space, start, end, done):
@@ -194,7 +194,9 @@ def main():
     wait_cmd = WAIT_FOR_COMMAND_END and not args.now
 
     try:
-        acad = comtypes.client.GetActiveObject("AutoCAD.Application", dynamic=True)
+        # 不用 dynamic：全部走 AutoCAD 型別庫的早期繫結，不靠名稱查詢
+        # （中文版等非英文 AutoCAD 用名稱查詢時會找不到 AddDimDiameter 等方法）
+        acad = typed(comtypes.client.GetActiveObject("AutoCAD.Application"))
     except (OSError, COMError):
         print("找不到執行中的 AutoCAD。請先開啟 AutoCAD（LT 版不支援），再執行本程式。")
         return
@@ -206,7 +208,7 @@ def main():
 
     while True:
         try:
-            doc = acad.ActiveDocument
+            doc = typed(acad.ActiveDocument)
             doc_key = doc.Name
 
             if wait_cmd and doc.GetVariable("CMDACTIVE"):
