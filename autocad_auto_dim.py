@@ -101,17 +101,22 @@ def acad_typelib():
 
 def as_entity(ent, name):
     """把 space.Item() 拿到的 IAcadEntity 明確轉成 IAcadCircle、IAcadLine 等介面。"""
+    return cast(ent, INTERFACES[name])
+
+
+def cast(obj, iface_name):
+    """明確轉成指定的 AutoCAD 介面；不行就改用動態呼叫。"""
     lib = acad_typelib()
-    iface = getattr(lib, INTERFACES[name], None) if lib else None
+    iface = getattr(lib, iface_name, None) if lib else None
     if iface is not None:
         try:
-            return ent.QueryInterface(iface)
+            return obj.QueryInterface(iface)
         except Exception as e:
             if VERBOSE:
                 print(f"QueryInterface({iface.__name__}) 失敗: {e!r}，改用動態呼叫")
     elif VERBOSE:
         print("找不到 AutoCAD 型別庫模組，改用動態呼叫")
-    return comtypes.client.dynamic.Dispatch(ent.QueryInterface(IDispatch))
+    return comtypes.client.dynamic.Dispatch(obj.QueryInterface(IDispatch))
 
 
 def ensure_layer(doc):
@@ -194,7 +199,9 @@ HANDLERS = {
 
 def active_space(doc):
     """目前作用中的空間：模型空間或圖紙空間（配置）。"""
-    return typed(doc.ModelSpace if doc.ActiveSpace == 1 else doc.PaperSpace)
+    if doc.ActiveSpace == 1:
+        return cast(doc.ModelSpace, "IAcadModelSpace")
+    return cast(doc.PaperSpace, "IAcadPaperSpace")
 
 
 def process_range(space, start, end, done):
@@ -245,7 +252,7 @@ def main():
 
     while True:
         try:
-            doc = typed(acad.ActiveDocument)
+            doc = cast(acad.ActiveDocument, "IAcadDocument")
             doc_key = doc.Name
 
             if wait_cmd and doc.GetVariable("CMDACTIVE"):
