@@ -486,6 +486,46 @@ def annotate_file(acad, path, save, annotators):
     return doc
 
 
+def diagnose(acad):
+    """印出 CAD 環境資訊，以及模型空間認得哪些方法。"""
+    def safe(fn):
+        try:
+            return fn()
+        except Exception as e:
+            return f"<{e!r}>"
+
+    print("---- 診斷資訊 ----")
+    print("Python:", sys.version)
+    print("comtypes:", safe(lambda: comtypes.__version__))
+    print("程式名稱:", safe(lambda: get(acad, "Name")))
+    print("版本:", safe(lambda: get(acad, "Version")))
+    print("路徑:", safe(lambda: get(acad, "FullName")))
+    print("型別庫模組:", safe(lambda: acad_typelib().__name__))
+    doc = cast(acad.ActiveDocument, "IAcadDocument")
+    print("圖面:", safe(lambda: doc.Name), " ActiveSpace:", safe(lambda: doc.ActiveSpace))
+    for label, getter, iface in (("ModelSpace", lambda: doc.ModelSpace, "IAcadModelSpace"),
+                                 ("ActiveLayout.Block", lambda: doc.ActiveLayout.Block, "IAcadBlock")):
+        obj = safe(getter)
+        if isinstance(obj, str):
+            print(label, "取得失敗:", obj)
+            continue
+        print(f"{label}: 原始型別 {type(obj).__name__}")
+        disp = safe(lambda: obj.QueryInterface(IDispatch))
+        if isinstance(disp, str):
+            print("  QueryInterface(IDispatch) 失敗:", disp)
+            continue
+        print("  GetTypeInfo:", safe(lambda: disp.GetTypeInfo(0).GetDocumentation(-1)[0]))
+        print("  ObjectName:", safe(lambda: _invoke(obj, "ObjectName", DISPATCH_PROPERTYGET)))
+        print("  Count:", safe(lambda: _invoke(obj, "Count", DISPATCH_PROPERTYGET)))
+        for m in ("AddLine", "AddCircle", "AddDimAligned", "AddDimRotated",
+                  "AddDimDiameter", "AddDimRadial", "AddDim3PointAngular", "AddDimOrdinate"):
+            print(f"  {m}: DISPID", safe(lambda: disp.GetIDsOfNames(m)[0]))
+        typed_obj = safe(lambda: cast(obj, iface))
+        print(f"  轉成 {iface}: {type(typed_obj).__name__}, 有 AddDimDiameter: "
+              f"{hasattr(typed_obj, 'AddDimDiameter') if not isinstance(typed_obj, str) else typed_obj}")
+    print("---- 診斷結束，請把以上全部貼給我 ----")
+
+
 def main():
     global VERBOSE
     parser = argparse.ArgumentParser(description="AutoCAD 自動標註")
@@ -495,6 +535,7 @@ def main():
     parser.add_argument("--no-save", action="store_true", help="讀圖檔標註後不要另存")
     parser.add_argument("--now", action="store_true", help="不等指令結束，畫一段就標一段")
     parser.add_argument("-v", "--verbose", action="store_true", help="顯示除錯訊息")
+    parser.add_argument("--diag", action="store_true", help="檢查 CAD 環境後結束（回報問題用）")
     args = parser.parse_args()
     VERBOSE = args.verbose
     wait_cmd = WAIT_FOR_COMMAND_END and not args.now
@@ -507,6 +548,9 @@ def main():
         return
     acad = cast(acad, "IAcadApplication")
     print(f"已連線 AutoCAD {acad.Version}")
+    if args.diag:
+        diagnose(acad)
+        return
 
     annotators = {}   # 圖面名稱 -> Annotator
     counts = {}       # (圖面, 空間) -> 上次看到的物件數量
