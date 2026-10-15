@@ -70,3 +70,18 @@ SKETCHCONCEPT_REPO=... SKETCHCONCEPT_PYTHON=... python3 tests/test_bridge.py   #
 - 只處理 2D、世界座標。
 - 約束是由幾何推論的（AutoCAD 一般圖面沒有存約束），容差為圖面大小的 1e-7。
 - 概念庫是固定的，不會從你的圖學習新概念。
+
+## Python 版：畫圖時自動標註（`autocad_auto_dim.py`）
+
+需求：Windows + 完整版 AutoCAD（LT 不支援）+ `pip install comtypes`。先開 AutoCAD 再執行。
+
+| 指令 | 功能 |
+|---|---|
+| `python autocad_auto_dim.py` | 監看目前圖面，新畫的物件自動標註 |
+| `python autocad_auto_dim.py --all` | 目前圖面既有物件也一起標註 |
+| `python autocad_auto_dim.py 圖檔.dwg` | 開啟圖檔 → 全部標註 → 另存 `圖檔_標註.dwg` → 繼續監看 |
+| `python autocad_auto_dim.py 圖檔.dwg --once` | 同上，標完就結束（可一次給多個檔案） |
+
+標註內容：線 → 長度、相接兩線 → 角度、圓 → 直徑 + 中心線、弧 → 半徑 + 中心線、點 → X/Y 座標、聚合線 → 每段長度與轉角角度。
+會建立圖層 `AUTO_DIM`（標註）、`中心線`（CENTER 線型）、`虛線`（HIDDEN 線型，設為目前圖層即可畫虛線）。
+其他參數：`--now`（畫一段標一段）、`--no-save`、`-v`（除錯訊息）。設定值在檔案開頭。
