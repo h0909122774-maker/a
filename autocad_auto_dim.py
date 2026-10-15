@@ -9,6 +9,9 @@ AutoCAD 自動標註 (Python + COM)
     弧 (ARC)            -> 半徑標註 + 十字中心線
     聚合線 (LWPOLYLINE) -> 每一段直線段的長度標註
     相接的兩條線        -> 角度標註（線段端點相接、且不是一直線時）
+    立體 (3D 實體/曲面/網格) -> 外框的長、寬、高（圓柱、球、圓錐的長改標直徑 Ø）
+
+字高會跟著物件大小變化（大物件大字、小物件小字），用 --text 可改成固定字高。
 
 另外會建立兩個圖層：
     中心線   線型 CENTER（一點鏈線），自動中心線畫在這裡
@@ -55,7 +58,11 @@ from comtypes import COMError
 DIM_LAYER = "AUTO_DIM"        # 標註放在這個圖層
 CENTER_LAYER = "中心線"        # 自動中心線放在這個圖層（線型 CENTER）
 HIDDEN_LAYER = "虛線"          # 虛線圖層（線型 HIDDEN）
-TEXT_RATIO = 1 / 40           # 自動字高 = 圖形大小 × 這個比例（字太小就調大，例如 1/25）
+TEXT_RATIO = 1 / 40           # 整張圖的基準字高 = 圖形大小 × 這個比例
+SIZE_BY_OBJECT = True         # True: 字高跟著每個物件的大小變（大物件大字、小物件小字）
+OBJECT_TEXT_RATIO = 1 / 10    # 物件字高 = 物件大小 × 這個比例（字太小就調大，例如 1/6）
+MIN_TEXT_FACTOR = 0.3         # 物件字高最小不小於基準字高的幾倍（避免小東西的字小到看不見）
+MAX_TEXT_FACTOR = 3.0         # 物件字高最大不超過基準字高的幾倍
 # 以下距離都以「字高」為單位，會跟著字高一起縮放
 LINE_OFFSET = 2.5             # 長度標註離線的距離
 POINT_LEADER = 4.0            # 點座標標註的引線長度
@@ -114,7 +121,21 @@ INTERFACES = {
     "AcDbArc": "IAcadArc",
     "AcDbPoint": "IAcadPoint",
     "AcDbPolyline": "IAcadLWPolyline",
+    "AcDb3dSolid": "IAcad3DSolid",
 }
+
+# 其他立體物件（曲面、網格）：用外框標長、寬、高
+SOLID_NAMES = ("AcDb3dSolid", "AcDbSubDMesh", "AcDbPolyFaceMesh", "AcDbPolygonMesh")
+
+
+def is_solid(name):
+    return name in SOLID_NAMES or name.endswith("Surface")
+
+
+def iface_for(name):
+    if name in INTERFACES:
+        return INTERFACES[name]
+    return "IAcadEntity" if is_solid(name) else None
 
 
 def typed(obj):
@@ -312,10 +333,25 @@ class Annotator:
                 size = float(self.doc.GetVariable("VIEWSIZE"))   # 空白圖：用目前畫面高度
             h = nice_number(size * TEXT_RATIO)
             how = "自動"
-        dimtxt = float(self.doc.GetVariable("DIMTXT")) or 2.5
+        self.dimtxt = float(self.doc.GetVariable("DIMTXT")) or 2.5
+        self.fixed = bool(text_height)
+        self.base_h = h
+        self.use_height(h)
+        if self.fixed or not SIZE_BY_OBJECT:
+            print(f"標註字高 {h:g}（{how}；可用 --text 指定）")
+        else:
+            print(f"標註字高依物件大小自動調整（基準 {h:g}；用 --text 可固定字高）")
+
+    def use_height(self, h):
         self.h = h
-        self.scale = h / dimtxt                # 標註的 ScaleFactor（字、箭頭一起放大）
-        print(f"標註字高 {h:g}（{how}；可用 --text 指定）")
+        self.scale = h / self.dimtxt           # 標註的 ScaleFactor（字、箭頭一起放大）
+
+    def height_for(self, size):
+        """依物件大小決定這個物件的字高。"""
+        if self.fixed or not SIZE_BY_OBJECT or size <= TOL:
+            return self.base_h
+        h = nice_number(size * OBJECT_TEXT_RATIO)
+        return min(max(h, self.base_h * MIN_TEXT_FACTOR), self.base_h * MAX_TEXT_FACTOR)
 
     def k(self, factor):
         """以字高為單位的距離。"""
@@ -344,10 +380,11 @@ class Annotator:
         for i in range(start, end):
             ent = retry(self.space.Item, i)
             handle, name, layer = retry(lambda: (ent.Handle, ent.ObjectName, ent.Layer))
-            if name not in INTERFACES or layer in OWN_LAYERS:
+            iface = iface_for(name)
+            if iface is None or layer in OWN_LAYERS:
                 yield handle, name, None
             else:
-                yield handle, name, cast(ent, INTERFACES[name])
+                yield handle, name, cast(ent, iface)
 
     def read_geometry(self, handle, name, ent):
         if name == "AcDbLine":
@@ -361,6 +398,28 @@ class Annotator:
         elif name == "AcDbPoint":
             c = ent.Coordinates
             self.grow_bbox(c[0], c[1])
+        elif is_solid(name):
+            lo, hi = self.bounding_box(ent)
+            self.grow_bbox(lo[0], lo[1], hi[0], hi[1])
+
+    @staticmethod
+    def bounding_box(ent):
+        lo, hi = call(ent, "GetBoundingBox")
+        return tuple(lo), tuple(hi)
+
+    def object_size(self, handle, name, ent):
+        """物件大小：圖形（相連線段）外框的長邊、圓的直徑、立體外框的最長邊。"""
+        if name == "AcDbLine":
+            return self.shape_info(handle)[1]
+        if name == "AcDbPolyline":
+            sids = [sid for sid in self.segments if sid.startswith(f"{handle}:")]
+            return self.shape_info(sids[0])[1] if sids else 0.0
+        if name in ("AcDbCircle", "AcDbArc"):
+            return 2 * ent.Radius
+        if is_solid(name):
+            lo, hi = self.bounding_box(ent)
+            return max(hi[i] - lo[i] for i in range(3))
+        return 0.0
 
     def collect(self, start, end):
         for handle, name, ent in self.entities(start, end):
@@ -386,6 +445,8 @@ class Annotator:
                     log(f"略過 {name}（不支援或本程式畫的物件）")
                 continue
             try:
+                h = self.height_for(retry(self.object_size, handle, name, ent))
+                self.use_height(h)
                 dims = retry(self.annotate_entity, handle, name, ent)
                 for d in dims:
                     put(d, "Layer", DIM_LAYER)
@@ -393,7 +454,7 @@ class Annotator:
                         put(d, "ScaleFactor", self.scale)
                     except Exception as e:
                         log(f"設定標註比例失敗: {e!r}")
-                print(f"已標註 {name} (handle {handle})")
+                print(f"已標註 {name} (handle {handle}，字高 {h:g})")
             except Exception as e:
                 print(f"標註失敗 {name} (handle {handle}): {e!r}")
                 if VERBOSE:
@@ -418,6 +479,8 @@ class Annotator:
             self.centerline(ent.Center, ent.Radius)
         elif name == "AcDbPoint":
             out += self.dim_point(ent)
+        elif is_solid(name):
+            out += self.dim_solid(ent)
         return out
 
     @staticmethod
@@ -432,12 +495,18 @@ class Annotator:
             yield pts[i], pts[(i + 1) % n]
 
     def shape_center(self, sid):
+        return self.shape_info(sid)[0]
+
+    def shape_info(self, sid):
         """和這段線相連的整個圖形（例如一個矩形）的中心，用來把標註放到外側。"""
         seen, stack = {sid}, [sid]
         sx = sy = total = 0.0
+        xs, ys = [], []
         while stack and len(seen) < 5000:
             cur = stack.pop()
             p1, p2 = self.segments[cur]
+            xs += [p1[0], p2[0]]
+            ys += [p1[1], p2[1]]
             length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
             sx += (p1[0] + p2[0]) / 2 * length
             sy += (p1[1] + p2[1]) / 2 * length
@@ -447,7 +516,8 @@ class Annotator:
                     if nxt not in seen:
                         seen.add(nxt)
                         stack.append(nxt)
-        return (sx / total, sy / total) if total > TOL else None
+        size = max(max(xs) - min(xs), max(ys) - min(ys))
+        return ((sx / total, sy / total) if total > TOL else None), size
 
     def dim_segment(self, sid):
         """線段長度標註，放在圖形外側。"""
@@ -490,6 +560,34 @@ class Annotator:
         dim_x = call(self.space, "AddDimOrdinate", apt(x, y), apt(x, y + lead), True)   # X 座標
         dim_y = call(self.space, "AddDimOrdinate", apt(x, y), apt(x + lead, y), False)  # Y 座標
         return [dim_x, dim_y]
+
+    def dim_solid(self, ent):
+        """立體物件：依外框標長 (X)、寬 (Y)、高 (Z)。圓柱、球、圓錐的長改標直徑 Ø。"""
+        (x0, y0, z0), (x1, y1, z1) = self.bounding_box(ent)
+        off = self.k(LINE_OFFSET)
+        dims = []
+        try:
+            solid_type = str(get(ent, "SolidType"))
+        except Exception:
+            solid_type = ""
+        round_solid = solid_type.lower() in ("cylinder", "sphere", "cone", "torus")
+
+        if x1 - x0 > TOL:      # 長：前面底邊，往 -Y 偏移
+            d = call(self.space, "AddDimAligned", apt(x0, y0, z0), apt(x1, y0, z0),
+                     apt((x0 + x1) / 2, y0 - off, z0))
+            if round_solid:
+                put(d, "TextOverride", "%%c<>")
+            dims.append(d)
+        if y1 - y0 > TOL and not round_solid:   # 寬：右側底邊，往 +X 偏移
+            dims.append(call(self.space, "AddDimAligned", apt(x1, y0, z0), apt(x1, y1, z0),
+                             apt(x1 + off, (y0 + y1) / 2, z0)))
+        if z1 - z0 > TOL:      # 高：先在 XY 平面畫好，再繞 Y 軸轉 -90° 立起來
+            hgt = z1 - z0
+            d = call(self.space, "AddDimAligned", apt(x0, y0, z0), apt(x0 + hgt, y0, z0),
+                     apt(x0 + hgt / 2, y0 - off, z0))
+            call(d, "Rotate3D", apt(x0, y0, z0), apt(x0, y0 + 1, z0), -math.pi / 2)
+            dims.append(d)
+        return dims
 
     def centerline(self, center, r):
         """畫十字中心線（水平 + 垂直），放在中心線圖層。"""
