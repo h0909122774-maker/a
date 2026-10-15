@@ -17,6 +17,8 @@ AutoCAD 自動標註 (Python + COM)
     1. 先開啟 AutoCAD 和要畫的圖檔
     2. python autocad_auto_dim.py          # 只標註「之後」新畫的物件
        python autocad_auto_dim.py --all    # 先把圖上既有物件也全部標註
+       python autocad_auto_dim.py --now    # 不等指令結束，畫一段就標一段
+       python autocad_auto_dim.py -v       # 顯示除錯訊息（沒標註時用來查原因）
     3. 在 AutoCAD 裡正常畫圖，按 Ctrl+C 停止腳本
 """
 
@@ -35,6 +37,7 @@ POINT_LEADER = 10.0           # 點座標標註的引線長度
 CIRCLE_LEADER = 5.0           # 圓/弧標註的引線長度
 POLL_INTERVAL = 0.3           # 每幾秒檢查一次新物件
 WAIT_FOR_COMMAND_END = True   # True: 等指令(如 LINE)結束後才標註，避免干擾繪圖
+VERBOSE = False               # 用 -v 參數開啟除錯訊息
 # ----------------------------------------------
 
 # AutoCAD 忙碌時 COM 會回傳這些錯誤碼，稍後重試即可
@@ -155,61 +158,92 @@ def annotate(ms, ent):
 
 # ---------------- 主迴圈 ----------------
 
-def process_range(doc, start, end, done):
-    ms = doc.ModelSpace
+def active_space(doc):
+    """目前作用中的空間：模型空間或圖紙空間（配置）。"""
+    return doc.ModelSpace if doc.ActiveSpace == 1 else doc.PaperSpace
+
+
+def process_range(space, start, end, done):
     for i in range(start, end):
-        ent = retry(ms.Item, i)
+        ent = retry(space.Item, i)
         handle = ent.Handle
         if handle in done:
             continue
         done.add(handle)
+        name = ent.ObjectName
+        if name not in HANDLERS or ent.Layer == DIM_LAYER:
+            if VERBOSE and "Dimension" not in name:
+                print(f"略過 {name}（不支援的物件類型）")
+            continue
         try:
-            if retry(annotate, ms, ent):
-                print(f"已標註 {ent.ObjectName} (handle {handle})")
-        except com_error as e:
-            print(f"標註失敗 {ent.ObjectName} (handle {handle}): {e}")
+            annotate(space, ent)
+            print(f"已標註 {name} (handle {handle})")
+        except Exception as e:
+            print(f"標註失敗 {name} (handle {handle}): {e!r}")
 
 
 def main():
+    global VERBOSE
     parser = argparse.ArgumentParser(description="AutoCAD 自動標註")
     parser.add_argument("--all", action="store_true", help="啟動時也標註圖上既有物件")
+    parser.add_argument("--now", action="store_true", help="不等指令結束，畫一段就標一段")
+    parser.add_argument("-v", "--verbose", action="store_true", help="顯示除錯訊息")
     args = parser.parse_args()
+    VERBOSE = args.verbose
+    wait_cmd = WAIT_FOR_COMMAND_END and not args.now
 
-    acad = win32com.client.GetActiveObject("AutoCAD.Application")
-    print("已連線 AutoCAD，開始監看新物件… (Ctrl+C 停止)")
+    try:
+        acad = win32com.client.GetActiveObject("AutoCAD.Application")
+    except com_error:
+        print("找不到執行中的 AutoCAD。請先開啟 AutoCAD（LT 版不支援），再執行本程式。")
+        return
+    print(f"已連線 {acad.Name} {acad.Version}，開始監看新物件… (Ctrl+C 停止)")
 
-    counts = {}   # 每份圖面上次看到的物件數量
-    done = {}     # 每份圖面已處理過的 handle
+    counts = {}   # (圖面, 空間) -> 上次看到的物件數量
+    done = {}     # 圖面 -> 已處理過的 handle
+    waiting = False
 
     while True:
         try:
             doc = acad.ActiveDocument
-            key = doc.FullName or doc.Name
+            doc_key = doc.FullName or doc.Name
 
-            if WAIT_FOR_COMMAND_END and doc.GetVariable("CMDACTIVE"):
-                time.sleep(POLL_INTERVAL)
-                continue
+            if wait_cmd and doc.GetVariable("CMDACTIVE"):
+                if VERBOSE and not waiting:
+                    print("指令執行中，等指令結束後再標註…")
+                waiting = True
+            else:
+                waiting = False
+                space = active_space(doc)
+                key = (doc_key, space.Name)
+                count = space.Count
 
-            count = doc.ModelSpace.Count
+                if doc_key not in done:
+                    ensure_layer(doc)
+                    done[doc_key] = set()
+                if key not in counts:
+                    counts[key] = 0 if args.all else count
+                    print(f"監看圖面: {doc.Name} / {space.Name}（目前 {count} 個物件）")
 
-            if key not in counts:
-                ensure_layer(doc)
-                done[key] = set()
-                counts[key] = 0 if args.all else count
-                print(f"監看圖面: {doc.Name}")
-
-            last = counts[key]
-            if count > last:
-                process_range(doc, last, count, done[key])
-                # 我們新增的標註會在下一輪被掃到，但因類型不符會被自動略過
-                counts[key] = count
-            elif count < last:
-                # 有物件被刪除（或 UNDO），重新設定基準
-                counts[key] = count
+                last = counts[key]
+                if count > last:
+                    if VERBOSE:
+                        print(f"偵測到 {count - last} 個新物件")
+                    process_range(space, last, count, done[doc_key])
+                    # 我們新增的標註會在下一輪被掃到，但因類型不符會被自動略過
+                    counts[key] = count
+                elif count < last:
+                    # 有物件被刪除（或 UNDO），重新設定基準
+                    counts[key] = count
 
         except com_error as e:
             if not is_busy(e):
                 print(f"COM 錯誤: {e}")
+        except KeyboardInterrupt:
+            print("停止自動標註")
+            break
+        except Exception as e:
+            print(f"錯誤: {e!r}")
 
         try:
             time.sleep(POLL_INTERVAL)
