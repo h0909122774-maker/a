@@ -52,7 +52,14 @@ def vpt(x, y, z=0.0):
 
 
 def is_busy(err):
-    return isinstance(err, com_error) and err.hresult in BUSY_ERRORS
+    """AutoCAD 正在忙（例如你正在下指令）而拒絕呼叫。
+
+    win32com 在 AutoCAD 忙碌時，讀取屬性可能會變成
+    AttributeError('<unknown>.屬性名')，這也當成忙碌處理。
+    """
+    if isinstance(err, com_error):
+        return err.hresult in BUSY_ERRORS
+    return isinstance(err, AttributeError) and "<unknown>." in str(err)
 
 
 def retry(fn, *args, tries=50, delay=0.1):
@@ -60,7 +67,7 @@ def retry(fn, *args, tries=50, delay=0.1):
     for _ in range(tries):
         try:
             return fn(*args)
-        except com_error as e:
+        except (com_error, AttributeError) as e:
             if is_busy(e):
                 time.sleep(delay)
                 continue
@@ -166,17 +173,16 @@ def active_space(doc):
 def process_range(space, start, end, done):
     for i in range(start, end):
         ent = retry(space.Item, i)
-        handle = ent.Handle
+        handle, name, layer = retry(lambda: (ent.Handle, ent.ObjectName, ent.Layer))
         if handle in done:
             continue
         done.add(handle)
-        name = ent.ObjectName
-        if name not in HANDLERS or ent.Layer == DIM_LAYER:
+        if name not in HANDLERS or layer == DIM_LAYER:
             if VERBOSE and "Dimension" not in name:
                 print(f"略過 {name}（不支援的物件類型）")
             continue
         try:
-            annotate(space, ent)
+            retry(annotate, space, ent)
             print(f"已標註 {name} (handle {handle})")
         except Exception as e:
             print(f"標註失敗 {name} (handle {handle}): {e!r}")
@@ -206,7 +212,7 @@ def main():
     while True:
         try:
             doc = acad.ActiveDocument
-            doc_key = doc.FullName or doc.Name
+            doc_key = doc.Name
 
             if wait_cmd and doc.GetVariable("CMDACTIVE"):
                 if VERBOSE and not waiting:
@@ -236,14 +242,15 @@ def main():
                     # 有物件被刪除（或 UNDO），重新設定基準
                     counts[key] = count
 
-        except com_error as e:
-            if not is_busy(e):
-                print(f"COM 錯誤: {e}")
         except KeyboardInterrupt:
             print("停止自動標註")
             break
         except Exception as e:
-            print(f"錯誤: {e!r}")
+            if is_busy(e):
+                if VERBOSE:
+                    print("AutoCAD 忙碌中，稍後重試…")
+            else:
+                print(f"錯誤: {e!r}")
 
         try:
             time.sleep(POLL_INTERVAL)
