@@ -144,7 +144,7 @@ def cast(obj, iface_name):
     return comtypes.client.dynamic.Dispatch(obj.QueryInterface(IDispatch))
 
 
-# 在某些 AutoCAD 版本上，模型空間的 AddDimDiameter 等方法用名稱找不到
+# 有些情況下 COM 方法用名稱找不到
 # (AttributeError / NameError)。這時改從物件自己的型別資訊查出 DISPID，
 # 直接用 IDispatch.Invoke 呼叫，不經過名稱查詢。
 DISPATCH_METHOD = 1
@@ -171,7 +171,7 @@ def _invoke(obj, name, kind, *args):
 
 
 def call(obj, method, *args):
-    """呼叫 COM 方法，例如 call(space, "AddDimDiameter", p1, p2, 5.0)。"""
+    """呼叫 COM 方法，例如 call(space, "AddDimDiametric", p1, p2, 5.0)。"""
     try:
         fn = getattr(obj, method)
     except (AttributeError, NameError) as e:
@@ -353,7 +353,7 @@ class Annotator:
         a = math.radians(45)
         p1 = apt(cx + r * math.cos(a), cy + r * math.sin(a))
         p2 = apt(cx - r * math.cos(a), cy - r * math.sin(a))
-        return [call(space, "AddDimDiameter", p1, p2, CIRCLE_LEADER)]
+        return [call(space, "AddDimDiametric", p1, p2, CIRCLE_LEADER)]
 
     @staticmethod
     def dim_arc(space, ent):
@@ -518,11 +518,11 @@ def diagnose(acad):
         print("  ObjectName:", safe(lambda: _invoke(obj, "ObjectName", DISPATCH_PROPERTYGET)))
         print("  Count:", safe(lambda: _invoke(obj, "Count", DISPATCH_PROPERTYGET)))
         for m in ("AddLine", "AddCircle", "AddDimAligned", "AddDimRotated",
-                  "AddDimDiameter", "AddDimRadial", "AddDim3PointAngular", "AddDimOrdinate"):
+                  "AddDimDiametric", "AddDimRadial", "AddDim3PointAngular", "AddDimOrdinate"):
             print(f"  {m}: DISPID", safe(lambda: disp.GetIDsOfNames(m)[0]))
         typed_obj = safe(lambda: cast(obj, iface))
-        print(f"  轉成 {iface}: {type(typed_obj).__name__}, 有 AddDimDiameter: "
-              f"{hasattr(typed_obj, 'AddDimDiameter') if not isinstance(typed_obj, str) else typed_obj}")
+        print(f"  轉成 {iface}: {type(typed_obj).__name__}, 有 AddDimDiametric: "
+              f"{hasattr(typed_obj, 'AddDimDiametric') if not isinstance(typed_obj, str) else typed_obj}")
     print("---- 診斷結束，請把以上全部貼給我 ----")
 
 
