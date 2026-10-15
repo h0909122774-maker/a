@@ -25,6 +25,7 @@ AutoCAD 自動標註 (Python + COM)
     python autocad_auto_dim.py 圖檔.dwg         # 開啟圖檔 -> 全部標註 -> 另存成「圖檔_標註.dwg」-> 繼續監看
     python autocad_auto_dim.py 圖檔.dwg --once  # 同上，但標完就結束
     python autocad_auto_dim.py a.dwg b.dwg --once   # 一次處理多個圖檔
+    python autocad_auto_dim.py --text 5        # 指定標註字高為 5（不指定就依圖形大小自動決定）
 
     其他參數:
       --now        不等指令結束，畫一段就標一段
@@ -54,13 +55,15 @@ from comtypes import COMError
 DIM_LAYER = "AUTO_DIM"        # 標註放在這個圖層
 CENTER_LAYER = "中心線"        # 自動中心線放在這個圖層（線型 CENTER）
 HIDDEN_LAYER = "虛線"          # 虛線圖層（線型 HIDDEN）
-LINE_OFFSET = 5.0             # 長度標註離線的距離（圖面單位）
-POINT_LEADER = 10.0           # 點座標標註的引線長度
-CIRCLE_LEADER = 5.0           # 圓/弧標註的引線長度
-ANGLE_RADIUS = 10.0           # 角度標註弧線離頂點的距離（線太短時會自動縮小）
-CENTER_EXTEND = 3.0           # 中心線超出圓的長度
+TEXT_RATIO = 1 / 40           # 自動字高 = 圖形大小 × 這個比例（字太小就調大，例如 1/25）
+# 以下距離都以「字高」為單位，會跟著字高一起縮放
+LINE_OFFSET = 2.5             # 長度標註離線的距離
+POINT_LEADER = 4.0            # 點座標標註的引線長度
+CIRCLE_LEADER = 2.0           # 圓/弧標註的引線長度
+ANGLE_RADIUS = 5.0            # 角度標註弧線離頂點的距離（線太短時會自動縮小）
+CENTER_EXTEND = 1.5           # 中心線超出圓的長度
 DIM_ANGLES = True             # 是否標註相接兩線的角度
-SKIP_RIGHT_ANGLE = False      # True: 90 度不標
+SKIP_RIGHT_ANGLE = True       # True: 90 度不標（改 False 就連直角也標）
 DRAW_CENTERLINES = True       # 是否幫圓/弧畫中心線
 SAVE_SUFFIX = "_標註"          # 讀圖檔標註後另存的檔名後綴
 POLL_INTERVAL = 0.3           # 每幾秒檢查一次新物件
@@ -255,6 +258,22 @@ def same_pt(a, b):
     return abs(a[0] - b[0]) <= TOL and abs(a[1] - b[1]) <= TOL
 
 
+def pt_key(p):
+    return (round(p[0], 6), round(p[1], 6))
+
+
+def nice_number(x):
+    """取整成 1、2、2.5、5 × 10^n 這類好看的數字。"""
+    if x <= 0:
+        return 2.5
+    exp = math.floor(math.log10(x))
+    base = x / 10 ** exp
+    for step in (1, 2, 2.5, 5, 10):
+        if base <= step * 1.25:
+            return step * 10 ** exp
+    return 10 ** (exp + 1)
+
+
 def unit(dx, dy):
     length = math.hypot(dx, dy)
     return (dx / length, dy / length) if length > TOL else None
@@ -263,65 +282,143 @@ def unit(dx, dy):
 # ---------------- 一份圖面的標註器 ----------------
 
 class Annotator:
-    def __init__(self, doc):
+    """一個空間（模型空間或某個配置）的標註器。"""
+
+    def __init__(self, doc, space, text_height=None):
         self.doc = doc
+        self.space = space
         self.done = set()          # 已處理過的物件 handle
-        self.segments = []         # 圖上的直線段 (p1, p2, id)
+        self.segments = {}         # 圖上的直線段 id -> (p1, p2)
+        self.pt_index = {}         # 端點 -> 接在這點的線段 id
         self.angle_keys = set()    # 已標過的角度 (頂點, 兩段 id)
+        self.bbox = None           # 圖形範圍 (xmin, ymin, xmax, ymax)
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
-    # ---- 讀物件 ----
-    def scan(self, space, start, end, annotate=True):
-        """處理 space 裡第 start ~ end-1 個物件。annotate=False 時只記錄幾何，不標註。"""
+        # 先讀一次既有物件的幾何（不標註），用來決定字高、判斷標註要放外側
+        self.collect(0, space.Count)
+        self.set_text_height(text_height)
+
+    # ---- 字高 / 比例 ----
+    def set_text_height(self, text_height):
+        if text_height:
+            h = text_height
+            how = "指定"
+        else:
+            size = 0.0
+            if self.bbox:
+                size = max(self.bbox[2] - self.bbox[0], self.bbox[3] - self.bbox[1])
+            if size <= TOL:
+                size = float(self.doc.GetVariable("VIEWSIZE"))   # 空白圖：用目前畫面高度
+            h = nice_number(size * TEXT_RATIO)
+            how = "自動"
+        dimtxt = float(self.doc.GetVariable("DIMTXT")) or 2.5
+        self.h = h
+        self.scale = h / dimtxt                # 標註的 ScaleFactor（字、箭頭一起放大）
+        print(f"標註字高 {h:g}（{how}；可用 --text 指定）")
+
+    def k(self, factor):
+        """以字高為單位的距離。"""
+        return factor * self.h
+
+    # ---- 幾何記錄 ----
+    def grow_bbox(self, x1, y1, x2=None, y2=None):
+        x2 = x1 if x2 is None else x2
+        y2 = y1 if y2 is None else y2
+        if self.bbox is None:
+            self.bbox = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        else:
+            b = self.bbox
+            self.bbox = (min(b[0], x1, x2), min(b[1], y1, y2), max(b[2], x1, x2), max(b[3], y1, y2))
+
+    def add_segment(self, sid, p1, p2):
+        if sid in self.segments:
+            return
+        self.segments[sid] = (p1, p2)
+        for p in (p1, p2):
+            self.pt_index.setdefault(pt_key(p), set()).add(sid)
+        self.grow_bbox(p1[0], p1[1], p2[0], p2[1])
+
+    def entities(self, start, end):
+        """逐一取出第 start ~ end-1 個物件：(handle, 物件名, 轉型後的物件)。"""
         for i in range(start, end):
-            ent = retry(space.Item, i)
+            ent = retry(self.space.Item, i)
             handle, name, layer = retry(lambda: (ent.Handle, ent.ObjectName, ent.Layer))
-            if handle in self.done:
-                continue
-            self.done.add(handle)
             if name not in INTERFACES or layer in OWN_LAYERS:
+                yield handle, name, None
+            else:
+                yield handle, name, cast(ent, INTERFACES[name])
+
+    def read_geometry(self, handle, name, ent):
+        if name == "AcDbLine":
+            self.add_segment(handle, ent.StartPoint, ent.EndPoint)
+        elif name == "AcDbPolyline":
+            for k, (p1, p2) in enumerate(self.poly_segments(ent)):
+                self.add_segment(f"{handle}:{k}", p1, p2)
+        elif name in ("AcDbCircle", "AcDbArc"):
+            c, r = ent.Center, ent.Radius
+            self.grow_bbox(c[0] - r, c[1] - r, c[0] + r, c[1] + r)
+        elif name == "AcDbPoint":
+            c = ent.Coordinates
+            self.grow_bbox(c[0], c[1])
+
+    def collect(self, start, end):
+        for handle, name, ent in self.entities(start, end):
+            if ent is not None:
+                try:
+                    retry(self.read_geometry, handle, name, ent)
+                except Exception as e:
+                    log(f"讀取 {name} 失敗: {e!r}")
+
+    # ---- 標註 ----
+    def scan(self, start, end, annotate=True):
+        """處理第 start ~ end-1 個物件。annotate=False 時只記錄，不標註。"""
+        items = [x for x in self.entities(start, end) if x[0] not in self.done]
+        for handle, name, ent in items:
+            self.done.add(handle)
+            if ent is not None:
+                retry(self.read_geometry, handle, name, ent)   # 先把這批的線段都記下來
+        if not annotate:
+            return
+        for handle, name, ent in items:
+            if ent is None:
                 if "Dimension" not in name:
                     log(f"略過 {name}（不支援或本程式畫的物件）")
                 continue
             try:
-                ent = cast(ent, INTERFACES[name])
-                retry(self.handle_entity, space, ent, name, handle, annotate)
-                if annotate:
-                    print(f"已標註 {name} (handle {handle})")
+                dims = retry(self.annotate_entity, handle, name, ent)
+                for d in dims:
+                    put(d, "Layer", DIM_LAYER)
+                    try:
+                        put(d, "ScaleFactor", self.scale)
+                    except Exception as e:
+                        log(f"設定標註比例失敗: {e!r}")
+                print(f"已標註 {name} (handle {handle})")
             except Exception as e:
                 print(f"標註失敗 {name} (handle {handle}): {e!r}")
                 if VERBOSE:
                     traceback.print_exc()
 
-    def handle_entity(self, space, ent, name, handle, annotate):
-        new_segs = []
+    def annotate_entity(self, handle, name, ent):
         out = []
         if name == "AcDbLine":
-            p1, p2 = ent.StartPoint, ent.EndPoint
-            new_segs.append((p1, p2, handle))
-            if annotate:
-                out += self.dim_segment(space, p1, p2)
+            out += self.dim_segment(handle)
+            out += self.dim_angles(handle)
         elif name == "AcDbPolyline":
-            for k, (p1, p2) in enumerate(self.poly_segments(ent)):
-                new_segs.append((p1, p2, f"{handle}:{k}"))
-                if annotate:
-                    out += self.dim_segment(space, p1, p2)
-        elif annotate and name == "AcDbCircle":
-            out += self.dim_circle(space, ent)
-            self.centerline(space, ent.Center, ent.Radius)
-        elif annotate and name == "AcDbArc":
-            out += self.dim_arc(space, ent)
-            self.centerline(space, ent.Center, ent.Radius)
-        elif annotate and name == "AcDbPoint":
-            out += self.dim_point(space, ent)
-
-        for seg in new_segs:
-            if annotate and DIM_ANGLES:
-                out += self.dim_angles(space, seg)
-            self.segments.append(seg)
-        for d in out:
-            put(d, "Layer", DIM_LAYER)
+            sids = [sid for sid in self.segments if sid.startswith(f"{handle}:")]
+            for sid in sids:
+                out += self.dim_segment(sid)
+            for sid in sids:
+                out += self.dim_angles(sid)
+        elif name == "AcDbCircle":
+            out += self.dim_circle(ent)
+            self.centerline(ent.Center, ent.Radius)
+        elif name == "AcDbArc":
+            out += self.dim_arc(ent)
+            self.centerline(ent.Center, ent.Radius)
+        elif name == "AcDbPoint":
+            out += self.dim_point(ent)
+        return out
 
     @staticmethod
     def poly_segments(ent):
@@ -334,54 +431,77 @@ class Annotator:
                 continue  # 弧形段先略過
             yield pts[i], pts[(i + 1) % n]
 
-    # ---- 各種標註 ----
-    @staticmethod
-    def dim_segment(space, p1, p2):
-        """兩點之間的對齊標註，標註線往線段左側偏移 LINE_OFFSET。"""
+    def shape_center(self, sid):
+        """和這段線相連的整個圖形（例如一個矩形）的中心，用來把標註放到外側。"""
+        seen, stack = {sid}, [sid]
+        sx = sy = total = 0.0
+        while stack and len(seen) < 5000:
+            cur = stack.pop()
+            p1, p2 = self.segments[cur]
+            length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+            sx += (p1[0] + p2[0]) / 2 * length
+            sy += (p1[1] + p2[1]) / 2 * length
+            total += length
+            for p in (p1, p2):
+                for nxt in self.pt_index.get(pt_key(p), ()):
+                    if nxt not in seen:
+                        seen.add(nxt)
+                        stack.append(nxt)
+        return (sx / total, sy / total) if total > TOL else None
+
+    def dim_segment(self, sid):
+        """線段長度標註，放在圖形外側。"""
+        p1, p2 = self.segments[sid]
         d = unit(p2[0] - p1[0], p2[1] - p1[1])
         if d is None:
             return []
         nx, ny = -d[1], d[0]
-        tx = (p1[0] + p2[0]) / 2 + nx * LINE_OFFSET
-        ty = (p1[1] + p2[1]) / 2 + ny * LINE_OFFSET
-        return [call(space, "AddDimAligned", apt(p1[0], p1[1]), apt(p2[0], p2[1]), apt(tx, ty))]
+        mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
+        c = self.shape_center(sid)
+        side = (mx - c[0]) * nx + (my - c[1]) * ny if c else 0.0
+        if abs(side) > TOL:
+            if side < 0:
+                nx, ny = -nx, -ny          # 往遠離圖形中心的那一側
+        elif ny < -TOL or (abs(ny) <= TOL and nx > 0):
+            nx, ny = -nx, -ny              # 單獨一條線：放上方（垂直線放左邊）
+        off = self.k(LINE_OFFSET)
+        return [call(self.space, "AddDimAligned", apt(p1[0], p1[1]), apt(p2[0], p2[1]),
+                     apt(mx + nx * off, my + ny * off))]
 
-    @staticmethod
-    def dim_circle(space, ent):
+    def dim_circle(self, ent):
         cx, cy = ent.Center[0], ent.Center[1]
         r = ent.Radius
         a = math.radians(45)
         p1 = apt(cx + r * math.cos(a), cy + r * math.sin(a))
         p2 = apt(cx - r * math.cos(a), cy - r * math.sin(a))
-        return [call(space, "AddDimDiametric", p1, p2, CIRCLE_LEADER)]
+        return [call(self.space, "AddDimDiametric", p1, p2, self.k(CIRCLE_LEADER))]
 
-    @staticmethod
-    def dim_arc(space, ent):
+    def dim_arc(self, ent):
         cx, cy = ent.Center[0], ent.Center[1]
         r = ent.Radius
         start, end = ent.StartAngle, ent.EndAngle
         mid = start + ((end - start) % (2 * math.pi)) / 2
         chord = apt(cx + r * math.cos(mid), cy + r * math.sin(mid))
-        return [call(space, "AddDimRadial", apt(cx, cy), chord, CIRCLE_LEADER)]
+        return [call(self.space, "AddDimRadial", apt(cx, cy), chord, self.k(CIRCLE_LEADER))]
 
-    @staticmethod
-    def dim_point(space, ent):
+    def dim_point(self, ent):
         x, y = ent.Coordinates[0], ent.Coordinates[1]
-        dim_x = call(space, "AddDimOrdinate", apt(x, y), apt(x, y + POINT_LEADER), True)   # X 座標
-        dim_y = call(space, "AddDimOrdinate", apt(x, y), apt(x + POINT_LEADER, y), False)  # Y 座標
+        lead = self.k(POINT_LEADER)
+        dim_x = call(self.space, "AddDimOrdinate", apt(x, y), apt(x, y + lead), True)   # X 座標
+        dim_y = call(self.space, "AddDimOrdinate", apt(x, y), apt(x + lead, y), False)  # Y 座標
         return [dim_x, dim_y]
 
-    def centerline(self, space, center, r):
+    def centerline(self, center, r):
         """畫十字中心線（水平 + 垂直），放在中心線圖層。"""
         if not DRAW_CENTERLINES:
             return
         cx, cy = center[0], center[1]
-        half = r + CENTER_EXTEND
+        half = r + self.k(CENTER_EXTEND)
         # 讓線型在這個長度上至少出現約兩個循環，小圓也看得出一點鏈線
         lt_scale = max(2 * half / (self.ltscale_base * 2), 0.01)
         for (x1, y1, x2, y2) in ((cx - half, cy, cx + half, cy),
                                  (cx, cy - half, cx, cy + half)):
-            line = call(space, "AddLine", apt(x1, y1), apt(x2, y2))
+            line = call(self.space, "AddLine", apt(x1, y1), apt(x2, y2))
             put(line, "Layer", CENTER_LAYER)
             try:
                 put(line, "LinetypeScale", lt_scale)
@@ -389,20 +509,17 @@ class Annotator:
                 pass
             self.done.add(get(line, "Handle"))
 
-    def dim_angles(self, space, seg):
-        """新線段的每個端點，和相接的線段之間加角度標註。"""
+    def dim_angles(self, sid):
+        """這段線的兩個端點，和相接的線段之間加角度標註。"""
+        if not DIM_ANGLES:
+            return []
         dims = []
-        p1, p2, sid = seg
-        for vertex, far in ((p1, p2), (p2, p1)):
-            # 在這個頂點相接的所有線段（含新的這段），記錄方向
+        for vertex in self.segments[sid]:
+            # 在這個頂點相接的所有線段，記錄方向
             rays = []
-            for q1, q2, qid in self.segments + [seg]:
-                if same_pt(q1, vertex):
-                    other = q2
-                elif same_pt(q2, vertex):
-                    other = q1
-                else:
-                    continue
+            for qid in self.pt_index.get(pt_key(vertex), ()):
+                q1, q2 = self.segments[qid]
+                other = q2 if same_pt(q1, vertex) else q1
                 u = unit(other[0] - vertex[0], other[1] - vertex[1])
                 if u is not None:
                     rays.append((math.atan2(u[1], u[0]), u, other, qid))
@@ -415,33 +532,30 @@ class Annotator:
                 a, b = rays[k], rays[(k + 1) % n]
                 if sid not in (a[3], b[3]) or a[3] == b[3]:
                     continue
-                gap = (b[0] - a[0]) % (2 * math.pi)
-                deg = math.degrees(gap)
+                deg = math.degrees((b[0] - a[0]) % (2 * math.pi))
                 if deg < 0.01 or deg > 179.99:
                     continue
                 if SKIP_RIGHT_ANGLE and abs(deg - 90) < 0.01:
                     continue
-                key = (round(vertex[0], 6), round(vertex[1], 6), frozenset((a[3], b[3])))
+                key = (pt_key(vertex), frozenset((a[3], b[3])))
                 if key in self.angle_keys:
                     continue
                 self.angle_keys.add(key)
-                dims.append(self.add_angle(space, vertex, a, b))
+                dims.append(self.add_angle(vertex, a, b))
         return dims
 
-    @staticmethod
-    def add_angle(space, vertex, ray_a, ray_b):
+    def add_angle(self, vertex, ray_a, ray_b):
         ua, ub = ray_a[1], ray_b[1]
         len_a = math.hypot(ray_a[2][0] - vertex[0], ray_a[2][1] - vertex[1])
         len_b = math.hypot(ray_b[2][0] - vertex[0], ray_b[2][1] - vertex[1])
-        radius = min(ANGLE_RADIUS, 0.4 * min(len_a, len_b))
+        radius = min(self.k(ANGLE_RADIUS), 0.6 * min(len_a, len_b))
         bis = unit(ua[0] + ub[0], ua[1] + ub[1])
         tx, ty = vertex[0] + bis[0] * radius, vertex[1] + bis[1] * radius
-        return call(space, "AddDim3PointAngular",
-            apt(vertex[0], vertex[1]),
-            apt(ray_a[2][0], ray_a[2][1]),
-            apt(ray_b[2][0], ray_b[2][1]),
-            apt(tx, ty),
-        )
+        return call(self.space, "AddDim3PointAngular",
+                    apt(vertex[0], vertex[1]),
+                    apt(ray_a[2][0], ray_a[2][1]),
+                    apt(ray_b[2][0], ray_b[2][1]),
+                    apt(tx, ty))
 
 
 # ---------------- 圖面操作 ----------------
@@ -469,21 +583,20 @@ def open_drawing(acad, path):
     return d
 
 
-def annotate_file(acad, path, save, annotators):
+def annotate_file(acad, path, save, text_height):
     print(f"開啟圖檔: {path}")
     doc = open_drawing(acad, path)
-    ann = Annotator(doc)
     space = cast(doc.ModelSpace, "IAcadModelSpace")
     count = space.Count
     print(f"模型空間共有 {count} 個物件，開始標註…")
-    ann.scan(space, 0, count)
+    ann = Annotator(doc, space, text_height)
+    ann.scan(0, count)
     if save:
         root, ext = os.path.splitext(os.path.abspath(path))
         out = f"{root}{SAVE_SUFFIX}{ext or '.dwg'}"
         retry(doc.SaveAs, out)
         print(f"已另存: {out}")
-    annotators[doc.Name] = ann
-    return doc
+    return doc, space, ann
 
 
 def diagnose(acad):
@@ -535,6 +648,7 @@ def main():
     parser.add_argument("--no-save", action="store_true", help="讀圖檔標註後不要另存")
     parser.add_argument("--now", action="store_true", help="不等指令結束，畫一段就標一段")
     parser.add_argument("-v", "--verbose", action="store_true", help="顯示除錯訊息")
+    parser.add_argument("--text", type=float, help="標註字高（不指定就依圖形大小自動決定）")
     parser.add_argument("--diag", action="store_true", help="檢查 CAD 環境後結束（回報問題用）")
     args = parser.parse_args()
     VERBOSE = args.verbose
@@ -552,14 +666,15 @@ def main():
         diagnose(acad)
         return
 
-    annotators = {}   # 圖面名稱 -> Annotator
+    annotators = {}   # (圖面, 空間) -> Annotator
     counts = {}       # (圖面, 空間) -> 上次看到的物件數量
 
     for f in args.files:
         try:
-            doc = annotate_file(acad, f, not args.no_save, annotators)
-            space = active_space(doc)
-            counts[(doc.Name, space.Name)] = space.Count
+            doc, space, ann = annotate_file(acad, f, not args.no_save, args.text)
+            key = (doc.Name, space.Name)
+            annotators[key] = ann
+            counts[key] = space.Count
         except Exception as e:
             print(f"處理圖檔失敗 {f}: {e!r}")
             if VERBOSE:
@@ -586,20 +701,19 @@ def main():
                 key = (doc_key, space.Name)
                 count = space.Count
 
-                if doc_key not in annotators:
-                    annotators[doc_key] = Annotator(doc)
-                ann = annotators[doc_key]
-
-                if key not in counts:
+                if key not in annotators:
                     print(f"監看圖面: {doc_key} / {space.Name}（目前 {count} 個物件）")
-                    # 既有物件：--all 就標註，否則只記錄線段（讓新線可以和舊線標角度）
-                    ann.scan(space, 0, count, annotate=args.all)
+                    annotators[key] = Annotator(doc, space, args.text)
+                    # 既有物件：--all 就標註，否則只記錄（讓新線可以和舊線標角度）
+                    annotators[key].scan(0, count, annotate=args.all)
                     counts[key] = count
+                ann = annotators[key]
+                ann.space = space
 
                 last = counts[key]
                 if count > last:
                     log(f"偵測到 {count - last} 個新物件")
-                    ann.scan(space, last, count)
+                    ann.scan(last, count)
                     # 我們新增的標註和中心線會在下一輪被掃到，但會被自動略過
                     counts[key] = count
                 elif count < last:
