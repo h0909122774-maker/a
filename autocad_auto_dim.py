@@ -345,6 +345,7 @@ class Annotator:
         self.created = {}          # 原物件 handle -> 本程式為它畫的標註/中心線
         self.tracked = {}          # 原物件 handle -> (物件名, 幾何特徵)，用來偵測刪除/修改
         self._made = []            # 標註一個物件時順便畫的中心線
+        self.has_old_dims = False  # 圖裡已經有本程式之前畫的標註
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
@@ -413,6 +414,8 @@ class Annotator:
             ent = retry(self.space.Item, i)
             handle, name, layer = retry(lambda: (ent.Handle, ent.ObjectName, ent.Layer))
             iface = iface_for(name)
+            if layer == DIM_LAYER:
+                self.has_old_dims = True
             if iface is None or layer in OWN_LAYERS:
                 yield handle, name, None
             else:
@@ -982,7 +985,8 @@ def main():
     global VERBOSE
     parser = argparse.ArgumentParser(description="AutoCAD 自動標註")
     parser.add_argument("files", nargs="*", help="要開啟並標註的圖檔 (.dwg)")
-    parser.add_argument("--all", action="store_true", help="目前圖面上既有的物件也標註")
+    parser.add_argument("--all", action="store_true",
+                        help="開啟/切換到的每張圖，圖上既有的物件也標註（已標過的圖會略過）")
     parser.add_argument("--once", action="store_true", help="處理完圖檔就結束，不繼續監看")
     parser.add_argument("--no-save", action="store_true", help="讀圖檔標註後不要另存")
     parser.add_argument("--now", action="store_true", help="不等指令結束，畫一段就標一段")
@@ -1051,9 +1055,16 @@ def main():
 
                 if key not in annotators:
                     print(f"監看圖面: {doc_key} / {space.Name}（目前 {count} 個物件）")
-                    annotators[key] = Annotator(doc, space, args.text)
+                    new_ann = Annotator(doc, space, args.text)
+                    annotators[key] = new_ann
                     # 既有物件：--all 就標註，否則只記錄（讓新線可以和舊線標角度）
-                    annotators[key].scan(0, count, annotate=args.all)
+                    # 已經標過的圖（有 AUTO_DIM 標註）不再重複標
+                    do_all = args.all and count > 0 and not new_ann.has_old_dims
+                    if args.all and new_ann.has_old_dims:
+                        print("這張圖已經有自動標註，略過既有物件（只標之後新畫的）")
+                    elif do_all:
+                        print("標註圖上既有物件…")
+                    new_ann.scan(0, count, annotate=do_all)
                     counts[key] = count
                 ann = annotators[key]
                 ann.space = space
