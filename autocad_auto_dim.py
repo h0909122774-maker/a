@@ -531,20 +531,38 @@ class Annotator:
         self.tracked.pop(handle, None)
 
     def check_changes(self):
-        """檢查標註過的物件有沒有被刪除或修改：刪除就一起刪標註，修改就重新標註。"""
+        """檢查標註過的物件有沒有被刪除或修改：刪除就一起刪標註，修改就重新標註。
+
+        直接掃一遍目前空間裡的物件（不用 HandleToObject，那個在某些情況會失敗，
+        讓還在的物件被誤當成已刪除）。
+        """
+        if not self.tracked:
+            return
+        present = {}
+        for i in range(self.space.Count):
+            ent = retry(self.space.Item, i)
+            handle = retry(lambda: ent.Handle)
+            if handle in self.tracked:
+                present[handle] = ent
         for handle, (name, sig) in list(self.tracked.items()):
-            try:
-                ent = cast(retry(self.doc.HandleToObject, handle), iface_for(name))
-                new_sig = retry(geometry_sig, name, ent)
-            except Exception:
+            if handle not in present:
                 self.forget(handle)
                 self.done.discard(handle)
                 print(f"{name} (handle {handle}) 已刪除，一併刪除它的標註")
                 continue
+            try:
+                ent = cast(present[handle], iface_for(name))
+                new_sig = retry(geometry_sig, name, ent)
+            except Exception as e:
+                log(f"讀取 {name} (handle {handle}) 失敗，稍後再試: {e!r}")
+                continue
             if new_sig != sig:
                 log(f"{name} (handle {handle}) 圖形改變: {sig} -> {new_sig}")
                 self.forget(handle)
-                retry(self.read_geometry, handle, name, ent)
+                try:
+                    retry(self.read_geometry, handle, name, ent)
+                except Exception as e:
+                    print(f"讀取 {name} 新圖形失敗: {e!r}")
                 self.annotate_one(handle, name, ent, verb="已更新標註")
 
     def annotate_entity(self, handle, name, ent):
