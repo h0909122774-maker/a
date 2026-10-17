@@ -1180,6 +1180,7 @@ def main():
                     print(f"監看圖面: {doc_key} / {space.Name}（目前 {count} 個物件）")
                     new_ann = Annotator(doc, space, args.text)
                     annotators[key] = new_ann
+                    counts[key] = count     # 先記下來：就算下面標註出錯，下一輪也不會 KeyError
                     # 既有物件：--all 就標註，否則只記錄（讓新線可以和舊線標角度）
                     if args.all and new_ann.has_old_dims:
                         # 之前標過的標註和原物件已經對不起來（改圖、縮放時不會跟著變），
@@ -1212,7 +1213,7 @@ def main():
                           else "▶ 自動標註已恢復")
                     was_paused = paused
 
-                last = counts[key]
+                last = counts.setdefault(key, count)
                 if count > last:
                     log(f"偵測到 {count - last} 個新物件")
                     # 暫停時只記錄，不標註；恢復後這些物件也不會被補標
