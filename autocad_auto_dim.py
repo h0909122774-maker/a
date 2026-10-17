@@ -479,7 +479,13 @@ class Annotator:
                 try:
                     retry(self.read_geometry, handle, name, ent)   # 先把這批的線段都記下來
                 except Exception as e:
-                    print(f"讀取 {name} (handle {handle}) 失敗，略過: {e!r}")
+                    # 早期繫結讀不到時，改用動態呼叫再試一次
+                    try:
+                        dyn = comtypes.client.dynamic.Dispatch(ent.QueryInterface(IDispatch))
+                        retry(self.read_geometry, handle, name, dyn)
+                        log(f"{name} (handle {handle}) 改用動態呼叫讀取成功")
+                    except Exception as e2:
+                        print(f"讀取 {name} (handle {handle}) 失敗，略過: {e!r} / {e2!r}")
         if not annotate:
             return
         for handle, name, ent in items:
