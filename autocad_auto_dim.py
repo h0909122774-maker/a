@@ -78,6 +78,10 @@ VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算�
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 SYNC_CHANGES = True           # 刪除物件時一起刪標註、修改物件時重新標註
 CHECK_INTERVAL = 1.0          # 每幾秒檢查一次刪除/修改
+SKIP_LAYERS = set()           # 這些圖層上的東西不標註，例如 {"組合件", "標準件"}
+                              # （另外，名稱以 NODIM 開頭的圖層也一律不標）
+PAUSE_VAR = "USERI5"          # 開關：AutoCAD 裡 USERI5 = 1 暫停自動標註，0 恢復（存在圖檔裡）
+DEDUPE = True                 # 重疊的線/同位置同大小的圓只標一次（畫組合件時避免重複標註）
 SAVE_SUFFIX = "_標註"          # 讀圖檔標註後另存的檔名後綴
 POLL_INTERVAL = 0.3           # 每幾秒檢查一次新物件
 WAIT_FOR_COMMAND_END = True   # True: 等指令(如 LINE)結束後才標註，避免干擾繪圖
@@ -86,6 +90,11 @@ VERBOSE = False               # 用 -v 參數開啟除錯訊息
 
 # 這些圖層上的物件是本程式畫的，不再標註
 OWN_LAYERS = {DIM_LAYER, CENTER_LAYER}
+
+
+def skip_layer(layer):
+    """不標註的圖層：本程式自己的圖層、SKIP_LAYERS、名稱以 NODIM 開頭的圖層。"""
+    return layer in OWN_LAYERS or layer in SKIP_LAYERS or layer.upper().startswith("NODIM")
 TOL = 1e-6
 
 # AutoCAD 忙碌時 COM 會回傳這些錯誤碼，稍後重試即可
@@ -346,6 +355,7 @@ class Annotator:
         self.tracked = {}          # 原物件 handle -> (物件名, 幾何特徵)，用來偵測刪除/修改
         self._made = []            # 標註一個物件時順便畫的中心線
         self.has_old_dims = False  # 圖裡已經有本程式之前畫的標註
+        self.claims = {}           # 幾何位置 -> 先標它的物件 handle（避免重複標註）
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
@@ -416,7 +426,7 @@ class Annotator:
             iface = iface_for(name)
             if layer == DIM_LAYER:
                 self.has_old_dims = True
-            if iface is None or layer in OWN_LAYERS:
+            if iface is None or skip_layer(layer):
                 yield handle, name, None
             else:
                 yield handle, name, cast(ent, iface)
@@ -529,6 +539,7 @@ class Annotator:
         self.angle_keys = {k for k in self.angle_keys if not (k[1] & set(sids))}
         self.round_items.pop(handle, None)
         self.tracked.pop(handle, None)
+        self.claims = {k: v for k, v in self.claims.items() if v != handle}
 
     def check_changes(self):
         """檢查標註過的物件有沒有被刪除或修改：刪除就一起刪標註，修改就重新標註。
@@ -576,12 +587,11 @@ class Annotator:
                 out += self.dim_segment(sid)
             for sid in sids:
                 out += self.dim_angles(sid)
-        elif name == "AcDbCircle":
-            out += self.dim_circle(ent)
-            self.centerline(ent.Center, ent.Radius)
-        elif name == "AcDbArc":
-            out += self.dim_arc(ent)
-            self.centerline(ent.Center, ent.Radius)
+        elif name in ("AcDbCircle", "AcDbArc"):
+            d = self.dim_circle(ent) if name == "AcDbCircle" else self.dim_arc(ent)
+            out += d
+            if d:      # 和別的圓重疊（已標過）就不再畫中心線
+                self.centerline(ent.Center, ent.Radius)
         elif name == "AcDbPoint":
             out += self.dim_point(ent)
         elif is_solid(name):
@@ -624,11 +634,23 @@ class Annotator:
         size = max(max(xs) - min(xs), max(ys) - min(ys))
         return ((sx / total, sy / total) if total > TOL else None), size
 
+    def claim(self, key, handle):
+        """同一個幾何位置只讓第一個物件標註；回傳 False 表示已經有別的物件標過。"""
+        if not DEDUPE:
+            return True
+        holder = self.claims.setdefault(key, handle)
+        if holder != handle:
+            log(f"略過重複標註（和 handle {holder} 重疊）")
+            return False
+        return True
+
     def dim_segment(self, sid):
         """線段長度標註，放在圖形外側。"""
         p1, p2 = self.segments[sid]
         d = unit(p2[0] - p1[0], p2[1] - p1[1])
         if d is None:
+            return []
+        if not self.claim(("seg",) + tuple(sorted((pt_key(p1), pt_key(p2)))), owner(sid)):
             return []
         nx, ny = -d[1], d[0]
         mx, my = (p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2
@@ -646,6 +668,8 @@ class Annotator:
     def dim_circle(self, ent):
         cx, cy = ent.Center[0], ent.Center[1]
         r = ent.Radius
+        if not self.claim(("circle", pt_key((cx, cy)), round(r, 6)), ent.Handle):
+            return []
         a = math.radians(45)
         p1 = apt(cx + r * math.cos(a), cy + r * math.sin(a))
         p2 = apt(cx - r * math.cos(a), cy - r * math.sin(a))
@@ -654,6 +678,8 @@ class Annotator:
     def dim_arc(self, ent):
         cx, cy = ent.Center[0], ent.Center[1]
         r = ent.Radius
+        if not self.claim(("arc", pt_key((cx, cy)), round(r, 6)), ent.Handle):
+            return []
         start, end = ent.StartAngle, ent.EndAngle
         mid = start + ((end - start) % (2 * math.pi)) / 2
         chord = apt(cx + r * math.cos(mid), cy + r * math.sin(mid))
@@ -834,12 +860,12 @@ class Annotator:
                     if key not in seen_r:
                         seen_r.add(key)
                         if name == "AcDbCircle":
-                            d = self.dim_circle(ent)[0]
-                            if counts[key] > 1:
-                                put(d, "TextOverride", f"{counts[key]}X%%c<>")
+                            got = self.dim_circle(ent)
+                            if got and counts[key] > 1:
+                                put(got[0], "TextOverride", f"{counts[key]}X%%c<>")
                         else:
-                            d = self.dim_arc(ent)[0]
-                        dims.append(d)
+                            got = self.dim_arc(ent)
+                        dims += got
                     if name == "AcDbCircle":
                         self.centerline(ent.Center, ent.Radius)
                 for d in dims:
@@ -972,6 +998,25 @@ def annotate_file(acad, path, save, text_height, views=False):
     return doc, space, ann
 
 
+def read_pause(doc):
+    try:
+        return int(doc.GetVariable(PAUSE_VAR)) == 1
+    except Exception:
+        return False
+
+
+def poll_key_toggle(paused):
+    """在 cmd 視窗按 P 切換暫停/恢復（只有 Windows 有 msvcrt）。"""
+    try:
+        import msvcrt
+    except ImportError:
+        return paused
+    while msvcrt.kbhit():
+        if msvcrt.getwch().lower() == "p":
+            paused = not paused
+    return paused
+
+
 def diagnose(acad):
     """印出 CAD 環境資訊，以及模型空間認得哪些方法。"""
     def safe(fn):
@@ -1069,7 +1114,11 @@ def main():
     print("開始監看新物件… (Ctrl+C 停止)")
     waiting = False
     last_check = 0.0
+    local_pause = False
+    was_paused = False
+    print("開關：AutoCAD 裡輸入 ADOFF / ADON（需載入 autodim_toggle.lsp），或在這個視窗按 P")
     while True:
+        local_pause = poll_key_toggle(local_pause)
         try:
             doc = cast(acad.ActiveDocument, "IAcadDocument")
             doc_key = doc.Name
@@ -1102,10 +1151,17 @@ def main():
                 ann = annotators[key]
                 ann.space = space
 
+                paused = local_pause or read_pause(doc)
+                if paused != was_paused:
+                    print("⏸ 自動標註已暫停（ADON 或在這裡按 P 恢復）" if paused
+                          else "▶ 自動標註已恢復")
+                    was_paused = paused
+
                 last = counts[key]
                 if count > last:
                     log(f"偵測到 {count - last} 個新物件")
-                    ann.scan(last, count)
+                    # 暫停時只記錄，不標註；恢復後這些物件也不會被補標
+                    ann.scan(last, count, annotate=not paused)
                     # 我們新增的標註和中心線會在下一輪被掃到，但會被自動略過
                     counts[key] = count
                 elif count < last:
@@ -1113,7 +1169,7 @@ def main():
                     counts[key] = count
 
                 # 每隔一段時間檢查：刪掉的物件連標註一起刪、改過的物件重新標註
-                if SYNC_CHANGES and time.time() - last_check >= CHECK_INTERVAL:
+                if SYNC_CHANGES and not paused and time.time() - last_check >= CHECK_INTERVAL:
                     ann.check_changes()
                     counts[key] = space.Count
                     last_check = time.time()

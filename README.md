@@ -89,3 +89,8 @@ SKETCHCONCEPT_REPO=... SKETCHCONCEPT_PYTHON=... python3 tests/test_bridge.py   #
 **三視圖**：`python autocad_auto_dim.py --views`（或 `圖檔.dwg --views`）自動分出每個視圖，標總長、總高、主要線段（同長度只標一次）、圓的直徑與中心線。
 會建立圖層 `AUTO_DIM`（標註）、`中心線`（CENTER 線型）、`虛線`（HIDDEN 線型，設為目前圖層即可畫虛線）。
 其他參數：`--now`（畫一段標一段）、`--no-save`、`-v`（除錯訊息）。設定值在檔案開頭。
+
+**開關與組合件**
+- 暫停/恢復：`APPLOAD` 載入 `autodim_toggle.lsp`，輸入 `ADOFF` 暫停、`ADON` 恢復、`ADSW` 切換（存在圖檔的 `USERI5`）；或在 Python 視窗按 `P`。暫停時畫的東西恢復後不會補標。
+- 重疊的線、同位置同大小的圓只標一次（`DEDUPE`）。
+- 圖層名稱以 `NODIM` 開頭，或列在 `SKIP_LAYERS` 的圖層不標註；組合件可把已標好的零件放這類圖層。
