@@ -11,7 +11,7 @@ AutoCAD 自動標註 (Python + COM)
     相接的兩條線        -> 角度標註（線段端點相接、且不是一直線時）
     立體 (3D 實體/曲面/網格) -> 外框的長、寬、高（圓柱、球、圓錐的長改標直徑 Ø）
 
-字高會跟著物件大小變化（大物件大字、小物件小字），用 --text 可改成固定字高。
+字高預設用標註型式的標準字高 (DIMTXT)，只有特別大的物件才放大；用 --text 可改成固定字高。
 
 另外會建立兩個圖層：
     中心線   線型 CENTER（一點鏈線），自動中心線畫在這裡
@@ -60,11 +60,11 @@ from comtypes import COMError
 DIM_LAYER = "AUTO_DIM"        # 標註放在這個圖層
 CENTER_LAYER = "中心線"        # 自動中心線放在這個圖層（線型 CENTER）
 HIDDEN_LAYER = "虛線"          # 虛線圖層（線型 HIDDEN）
-TEXT_RATIO = 1 / 40           # 整張圖的基準字高 = 圖形大小 × 這個比例
-SIZE_BY_OBJECT = True         # True: 字高跟著每個物件的大小變（大物件大字、小物件小字）
-OBJECT_TEXT_RATIO = 1 / 10    # 物件字高 = 物件大小 × 這個比例（字太小就調大，例如 1/6）
-MIN_TEXT_FACTOR = 0.1         # 物件字高最小不小於基準字高的幾倍（避免小東西的字小到看不見）
-MAX_TEXT_FACTOR = 10.0        # 物件字高最大不超過基準字高的幾倍
+# 字高：一般大小的零件用標註型式本來的字高（DIMTXT，通常 2.5 或 3.5），
+# 只有物件大於 NORMAL_SIZE 時才按比例放大，避免正常尺寸的圖標註變超大
+SIZE_BY_OBJECT = True         # True: 特別大的物件字跟著放大；False: 全部用標準字高
+NORMAL_SIZE = 200.0           # 物件大小在這以內都用標準字高（單位同圖面，例如 mm）
+MAX_TEXT_FACTOR = 20.0        # 放大最多到標準字高的幾倍
 # 以下距離都以「字高」為單位，會跟著字高一起縮放
 LINE_OFFSET = 2.5             # 長度標註離線的距離
 POINT_LEADER = 4.0            # 點座標標註的引線長度
@@ -366,25 +366,15 @@ class Annotator:
 
     # ---- 字高 / 比例 ----
     def set_text_height(self, text_height):
-        if text_height:
-            h = text_height
-            how = "指定"
-        else:
-            size = 0.0
-            if self.bbox:
-                size = max(self.bbox[2] - self.bbox[0], self.bbox[3] - self.bbox[1])
-            if size <= TOL:
-                size = float(self.doc.GetVariable("VIEWSIZE"))   # 空白圖：用目前畫面高度
-            h = nice_number(size * TEXT_RATIO)
-            how = "自動"
         self.dimtxt = float(self.doc.GetVariable("DIMTXT")) or 2.5
         self.fixed = bool(text_height)
+        h = text_height or self.dimtxt      # 預設：標註型式的標準字高
         self.base_h = h
         self.use_height(h)
         if self.fixed or not SIZE_BY_OBJECT:
-            print(f"標註字高 {h:g}（{how}；可用 --text 指定）")
+            print(f"標註字高 {h:g}（可用 --text 指定）")
         else:
-            print(f"標註字高依物件大小自動調整（基準 {h:g}；用 --text 可固定字高）")
+            print(f"標註字高 {h:g}；大於 {NORMAL_SIZE:g} 的物件會等比例放大（用 --text 可固定字高）")
 
     def use_height(self, h):
         self.h = h
@@ -392,10 +382,10 @@ class Annotator:
 
     def height_for(self, size):
         """依物件大小決定這個物件的字高。"""
-        if self.fixed or not SIZE_BY_OBJECT or size <= TOL:
+        if self.fixed or not SIZE_BY_OBJECT or size <= NORMAL_SIZE:
             return self.base_h
-        h = nice_number(size * OBJECT_TEXT_RATIO)
-        return min(max(h, self.base_h * MIN_TEXT_FACTOR), self.base_h * MAX_TEXT_FACTOR)
+        h = nice_number(self.base_h * size / NORMAL_SIZE)
+        return min(h, self.base_h * MAX_TEXT_FACTOR)
 
     def k(self, factor):
         """以字高為單位的距離。"""
