@@ -78,7 +78,7 @@ ARC_CENTERLINE_MIN_DEG = 180  # 弧要大於這個角度才畫中心線（小圓
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 VIEW_SEGMENTS = False         # 三視圖：是否標每段線長（工程圖通常不標，預設關）
-VIEW_EACH_ARC = True          # 三視圖：True 每個弧都標 R；False 相同半徑只標一次
+VIEW_EACH_ARC = False         # 三視圖：True 每個弧都標 R；False 相同半徑只標一次
 VIEW_OVERALL = False          # 三視圖：有孔時是否另外標總長、總高
 VIEWS_VAR = "USERI4"          # AutoCAD 裡輸入 ADVIEWS（設 USERI4 = 1）就對目前圖面做工程圖式標註
 SYNC_CHANGES = True           # 刪除物件時一起刪標註、修改物件時重新標註
@@ -315,6 +315,44 @@ def nice_number(x):
     return 10 ** (exp + 1)
 
 
+class PolyArc:
+    """聚合線的圓弧段，提供和 AcDbArc 一樣的 Center / Radius / StartAngle / EndAngle。"""
+
+    def __init__(self, center, radius, start, end, handle):
+        self.Center = (center[0], center[1], 0.0)
+        self.Radius = radius
+        self.StartAngle = start
+        self.EndAngle = end
+        self.Handle = handle
+
+
+def poly_arcs(ent):
+    """取出聚合線裡有凸度 (bulge) 的弧段。"""
+    c = list(ent.Coordinates)
+    pts = [(c[i], c[i + 1]) for i in range(0, len(c), 2)]
+    n = len(pts)
+    seg_count = n if ent.Closed else n - 1
+    handle = ent.Handle
+    for i in range(seg_count):
+        b = ent.GetBulge(i)
+        if abs(b) <= 1e-9:
+            continue
+        p1, p2 = pts[i], pts[(i + 1) % n]
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+        chord = math.hypot(dx, dy)
+        if chord <= TOL:
+            continue
+        lx, ly = -dy / chord, dx / chord                 # 弦的左側法向量
+        h = (chord / 2) * (1 - b * b) / (2 * b)          # 弦中點到圓心的距離（帶正負）
+        cx = (p1[0] + p2[0]) / 2 + lx * h
+        cy = (p1[1] + p2[1]) / 2 + ly * h
+        r = math.hypot(p1[0] - cx, p1[1] - cy)
+        a1 = math.atan2(p1[1] - cy, p1[0] - cx)
+        a2 = math.atan2(p2[1] - cy, p2[0] - cx)
+        start, end = (a1, a2) if b > 0 else (a2, a1)     # 統一成逆時針
+        yield PolyArc((cx, cy), r, start, end, f"{handle}:{i}")
+
+
 def owner(sid):
     """線段 id（handle 或 handle:段號）所屬的物件 handle。"""
     return str(sid).split(":")[0]
@@ -432,6 +470,12 @@ class Annotator:
         elif name == "AcDbPolyline":
             for k, (p1, p2) in enumerate(self.poly_segments(ent)):
                 self.add_segment(f"{handle}:{k}", p1, p2)
+            # 聚合線裡的圓弧段（例如對聚合線做 FILLET 產生的圓角）也當成弧
+            for k, arc in enumerate(poly_arcs(ent)):
+                c, r = arc.Center, arc.Radius
+                box = (c[0] - r, c[1] - r, c[0] + r, c[1] + r)
+                self.round_items[f"{handle}:a{k}"] = ("AcDbArc", arc, box)
+                self.grow_bbox(*box)
         elif name in ("AcDbCircle", "AcDbArc"):
             c, r = ent.Center, ent.Radius
             self.round_items[handle] = (name, ent, (c[0] - r, c[1] - r, c[0] + r, c[1] + r))
