@@ -78,6 +78,7 @@ ARC_CENTERLINE_MIN_DEG = 180  # 弧要大於這個角度才畫中心線（小圓
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 VIEW_SEGMENTS = False         # 三視圖：是否標每段線長（工程圖通常不標，預設關）
+VIEW_EACH_ARC = True          # 三視圖：True 每個弧都標 R；False 相同半徑只標一次
 VIEW_OVERALL = False          # 三視圖：有孔時是否另外標總長、總高
 VIEWS_VAR = "USERI4"          # AutoCAD 裡輸入 ADVIEWS（設 USERI4 = 1）就對目前圖面做工程圖式標註
 SYNC_CHANGES = True           # 刪除物件時一起刪標註、修改物件時重新標註
@@ -891,10 +892,15 @@ class Annotator:
 
                 # 孔大小：同直徑一組，挑離視圖中心最遠的那個標（引線比較好往外拉）
                 groups = {}
-                for nm, e in circles + arcs:
+                for nm, e in circles:
                     groups.setdefault((nm, round(e.Radius, 4)), []).append(e)
+                for nm, e in arcs:
+                    if VIEW_EACH_ARC:      # 每個弧各自標 R（同位置同半徑的重複弧只標一次）
+                        groups.setdefault((nm, round(e.Radius, 4), pt_key(e.Center)), []).append(e)
+                    else:
+                        groups.setdefault((nm, round(e.Radius, 4)), []).append(e)
                 per_center = {}
-                for (nm, _), ents in sorted(groups.items(), key=lambda kv: -kv[0][1]):
+                for (nm, _, *_rest), ents in sorted(groups.items(), key=lambda kv: -kv[0][1]):
                     rep = max(ents, key=lambda e: math.hypot(e.Center[0] - view_center[0],
                                                              e.Center[1] - view_center[1]))
                     k = pt_key(rep.Center)
