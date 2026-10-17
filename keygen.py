@@ -20,13 +20,11 @@ import os
 import re
 import sys
 
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 PRIVATE = os.path.join(HERE, "private_key.pem")
 LICENSING = os.path.join(HERE, "licensing.py")
 sys.path.insert(0, HERE)
+import ed25519_pure  # noqa: E402
 import licensing  # noqa: E402
 
 
@@ -34,12 +32,10 @@ def init():
     if os.path.exists(PRIVATE):
         print("private_key.pem 已經存在，不會覆蓋（覆蓋會讓所有舊授權碼失效）。")
         return
-    key = Ed25519PrivateKey.generate()
-    with open(PRIVATE, "wb") as f:
-        f.write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
-                                  serialization.NoEncryption()))
-    pub = base64.b64encode(key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+    seed = os.urandom(32)
+    with open(PRIVATE, "w", encoding="ascii") as f:
+        f.write(base64.b64encode(seed).decode() + "\n")
+    pub = base64.b64encode(ed25519_pure.public_key(seed)).decode()
     with open(LICENSING, encoding="utf-8") as f:
         src = f.read()
     src = re.sub(r'^PUBLIC_KEY = ".*"$', f'PUBLIC_KEY = "{pub}"', src, count=1, flags=re.M)
@@ -50,8 +46,8 @@ def init():
 
 
 def issue(code, days=None, until=None):
-    with open(PRIVATE, "rb") as f:
-        key = serialization.load_pem_private_key(f.read(), password=None)
+    with open(PRIVATE, encoding="ascii") as f:
+        seed = base64.b64decode(f.read().strip())
     code = code.strip().upper()
     if until:
         end = datetime.date.fromisoformat(until)
@@ -60,7 +56,7 @@ def issue(code, days=None, until=None):
     else:
         end = None
     expiry = int(end.strftime("%Y%m%d")) if end else 0
-    sig = key.sign(licensing.message(code, expiry))
+    sig = ed25519_pure.sign(seed, licensing.message(code, expiry))
     lic = licensing.encode_key(expiry, sig)
     print(f"機器碼：{code}")
     print(f"期限：{end or '永久'}")

@@ -13,7 +13,7 @@
 4. 只想看機器碼：AutoDim.exe --machine-code
 
 【作者（只有你自己做）】
-需要 Python 3.13：py -3.13 -m pip install cryptography
+需要 Python 3.13：py -3.13 -m pip install comtypes（不需要其他套件）
 1. 第一次：產生金鑰（只做一次！）
        py -3.13 keygen.py init
    → 產生 private_key.pem，公鑰自動寫進 licensing.py
@@ -25,7 +25,7 @@
        py -3.13 keygen.py 機器碼                 永久
        py -3.13 keygen.py 機器碼 --days 365      一年
        py -3.13 keygen.py 機器碼 --until 2027-12-31
-4. 絕對不要給別人：autocad_auto_dim.py、licensing.py、keygen.py、private_key.pem
+4. 絕對不要給別人：autocad_auto_dim.py、licensing.py、ed25519_pure.py、keygen.py、private_key.pem
 
 注意：
 - 程式是編譯過的 exe，看不到原始碼，但世上沒有破解不了的保護，

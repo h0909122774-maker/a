@@ -56,19 +56,17 @@ def decode_key(key):
 
 def verify(key, code=None):
     """回傳 (是否有效, 說明)。"""
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-    from cryptography.exceptions import InvalidSignature
+    import ed25519_pure
     if not PUBLIC_KEY:
         return False, "程式還沒設定公鑰（作者要先執行 keygen.py init）"
     code = code or machine_code()
     try:
         expiry, sig = decode_key(key)
-        pub = Ed25519PublicKey.from_public_bytes(base64.b64decode(PUBLIC_KEY))
-        pub.verify(sig, message(code, expiry))
-    except InvalidSignature:
-        return False, "授權碼不正確，或不是這台電腦的授權碼"
+        good = ed25519_pure.verify(base64.b64decode(PUBLIC_KEY), message(code, expiry), sig)
     except Exception:
         return False, "授權碼格式錯誤"
+    if not good:
+        return False, "授權碼不正確，或不是這台電腦的授權碼"
     if expiry:
         end = datetime.date(expiry // 10000, expiry // 100 % 100, expiry % 100)
         if datetime.date.today() > end:
