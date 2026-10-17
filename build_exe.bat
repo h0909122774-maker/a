@@ -10,7 +10,7 @@ if not exist "%HERE%autocad_auto_dim.py" (
   goto :fail
 )
 py -3.13 -m pip install --upgrade nuitka comtypes
-py -3.13 -c "import sys; sys.path.insert(0, r'%HERE%'); import licensing; sys.exit(0 if licensing.PUBLIC_KEY else 1)"
+py -3.13 -c "import licensing, sys; sys.exit(0 if licensing.PUBLIC_KEY else 1)"
 if errorlevel 1 (
   echo [ERROR] Run "py -3.13 keygen.py init" first.
   goto :fail
