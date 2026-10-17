@@ -1,1 +1,7 @@
 __pycache__/
+private_key.pem
+*.exe
+dist/
+*.build/
+*.dist/
+*.onefile-build/

@@ -1331,8 +1331,15 @@ def main():
                         help="三視圖模式：每個視圖標總長、總高、主要尺寸，標完就結束")
     parser.add_argument("--text", type=float, help="標註字高（不指定就依圖形大小自動決定）")
     parser.add_argument("--diag", action="store_true", help="檢查 CAD 環境後結束（回報問題用）")
+    parser.add_argument("--machine-code", action="store_true", help="顯示這台電腦的機器碼後結束")
     args = parser.parse_args()
     VERBOSE = args.verbose
+
+    import licensing
+    if args.machine_code:
+        print(f"機器碼：{licensing.machine_code()}")
+        return
+    licensing.check_or_prompt()
     wait_cmd = WAIT_FOR_COMMAND_END and not args.now
 
     try:
