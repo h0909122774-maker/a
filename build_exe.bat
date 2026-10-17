@@ -5,6 +5,12 @@ rem Needs 64-bit Python 3.13 (py -3.13-64). First run downloads the Zig C compil
 rem Tip: keep this folder at a short path without spaces, e.g. C:\autodim
 set "HERE=%~dp0"
 pushd "%HERE%"
+py -3.13-64 -c "import sys" >nul 2>nul
+if errorlevel 1 (
+  echo [ERROR] 64-bit Python 3.13 is not installed.
+  echo Download "Windows installer (64-bit)" from https://www.python.org/downloads/windows/
+  goto :fail
+)
 if not exist "%HERE%autocad_auto_dim.py" (
   echo [ERROR] autocad_auto_dim.py not found in %HERE%
   goto :fail
