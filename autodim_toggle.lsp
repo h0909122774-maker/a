@@ -4,7 +4,7 @@
 ;;;   ADON   resume auto dimensioning (USERI5 = 0)
 ;;;   ADSW   toggle
 ;;;   ADVIEWS  redo the whole drawing in engineering-drawing style
-;;;            (hole positions chained from centers, 2XØ4 hole labels, R once per size)
+;;;            (hole positions chained from centers, 2X%%c4 hole labels, R once per size)
 (defun c:ADOFF () (setvar "USERI5" 1) (princ "\nAuto dimension: OFF") (princ))
 (defun c:ADON  () (setvar "USERI5" 0) (princ "\nAuto dimension: ON") (princ))
 (defun c:ADSW  ()
