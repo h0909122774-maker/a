@@ -739,9 +739,18 @@ class Annotator:
                 nx, ny = -nx, -ny          # 往遠離圖形中心的那一側
         elif ny < -TOL or (abs(ny) <= TOL and nx > 0):
             nx, ny = -nx, -ny              # 單獨一條線：放上方（垂直線放左邊）
-        off = self.k(LINE_OFFSET)
+        length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        text = f"{round(length, 2):g}"
+        # 和其他標註撞到就往外推一層（最多 4 層）
+        for layer in range(4):
+            off = self.k(LINE_OFFSET) + layer * self.h * 3
+            tx, ty = mx + nx * off, my + ny * off
+            rect = self.text_rect(tx, ty, text)
+            if self.overlap(rect) <= 0:
+                break
+        self.occupied.append(rect)
         return [call(self.space, "AddDimAligned", apt(p1[0], p1[1]), apt(p2[0], p2[1]),
-                     apt(mx + nx * off, my + ny * off))]
+                     apt(tx, ty))]
 
     def dim_circle(self, ent):
         cx, cy = ent.Center[0], ent.Center[1]
@@ -875,13 +884,29 @@ class Annotator:
             if not uniq or c[axis] - uniq[-1][axis] > merge:
                 uniq.append(c)
         dims = []
+        row_gap = self.h * 3
         for a, b in zip(uniq, uniq[1:]):
+            span = abs(b[axis] - a[axis])
+            text = f"{round(span, 2):g}"
+            mid = (a[axis] + b[axis]) / 2
+            # 文字和同一排或其他標註撞到，就往外移一排（最多 4 排）
+            for row in range(4):
+                o = off + row * row_gap
+                if horizontal:
+                    rect = self.text_rect(mid, y0 - o, text)
+                else:
+                    rect = self.text_rect(0, 0, text)
+                    w, hh = rect[2] - rect[0], rect[3] - rect[1]
+                    rect = (x0 - o - hh / 2, mid - w / 2, x0 - o + hh / 2, mid + w / 2)   # 垂直文字
+                if self.overlap(rect) <= 0:
+                    break
+            self.occupied.append(rect)
             if horizontal:
                 dims.append(call(self.space, "AddDimRotated", apt(*a), apt(*b),
-                                 apt((a[0] + b[0]) / 2, y0 - off), 0.0))
+                                 apt(mid, y0 - o), 0.0))
             else:
                 dims.append(call(self.space, "AddDimRotated", apt(*a), apt(*b),
-                                 apt(x0 - off, (a[1] + b[1]) / 2), math.pi / 2))
+                                 apt(x0 - o, mid), math.pi / 2))
         return dims
 
     # ---- 避免標註擠在一起 ----
@@ -1012,6 +1037,7 @@ class Annotator:
                 for nm, e in circles + [(nm, e) for nm, e in arcs if self.wants_centerline(nm, e)]:
                     centers.setdefault(pt_key(e.Center), (e.Center[0], e.Center[1]))
                 centers = list(centers.values())
+                self.occupied = []
                 if len(centers) >= 2:
                     dims += self.step("水平位置尺寸", lambda: self.chain_dims(centers, box, True), [])
                     dims += self.step("垂直位置尺寸", lambda: self.chain_dims(centers, box, False), [])
@@ -1037,10 +1063,6 @@ class Annotator:
                         groups.setdefault((nm, round(e.Radius, 4), pt_key(e.Center)), []).append(e)
                     else:
                         groups.setdefault((nm, round(e.Radius, 4)), []).append(e)
-                # 已經被佔用的地方：位置尺寸那兩排
-                off2 = self.k(LINE_OFFSET) * 2
-                self.occupied = [(x0 - self.h * 4, y0 - off2 - self.h * 1.5, x1 + self.h * 4, y0 - off2 + self.h * 1.5),
-                                 (x0 - off2 - self.h * 1.5, y0 - self.h * 4, x0 - off2 + self.h * 1.5, y1 + self.h * 4)]
                 self.view_segs = [self.segments[sid] for _, kind, sid in members if kind == "seg"]
                 self.view_rounds = [(e.Center[0], e.Center[1], e.Radius) for _, e in circles + arcs]
                 per_center = {}
