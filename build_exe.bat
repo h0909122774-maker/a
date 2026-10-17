@@ -1,7 +1,7 @@
 @echo off
 setlocal
 rem Build AutoDim.exe (compiled with Nuitka, source code is not included).
-rem Needs Python 3.13 (py -3.13). First run downloads a C compiler automatically.
+rem Needs 64-bit Python 3.13 (py -3.13-64). First run downloads the Zig C compiler automatically.
 rem Tip: keep this folder at a short path without spaces, e.g. C:\autodim
 set "HERE=%~dp0"
 pushd "%HERE%"
@@ -9,13 +9,13 @@ if not exist "%HERE%autocad_auto_dim.py" (
   echo [ERROR] autocad_auto_dim.py not found in %HERE%
   goto :fail
 )
-py -3.13 -m pip install --upgrade nuitka comtypes
-py -3.13 -c "import licensing, sys; sys.exit(0 if licensing.PUBLIC_KEY else 1)"
+py -3.13-64 -m pip install --upgrade nuitka comtypes
+py -3.13-64 -c "import licensing, sys; sys.exit(0 if licensing.PUBLIC_KEY else 1)"
 if errorlevel 1 (
   echo [ERROR] Run "py -3.13 keygen.py init" first.
   goto :fail
 )
-py -3.13 -m nuitka --onefile --assume-yes-for-downloads ^
+py -3.13-64 -m nuitka --onefile --zig --assume-yes-for-downloads ^
   --include-package=comtypes ^
   --nofollow-import-to=comtypes.test --nofollow-import-to=unittest ^
   --include-module=licensing --include-module=ed25519_pure ^
