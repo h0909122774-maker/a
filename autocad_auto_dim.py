@@ -476,7 +476,10 @@ class Annotator:
         for handle, name, ent in items:
             self.done.add(handle)
             if ent is not None:
-                retry(self.read_geometry, handle, name, ent)   # 先把這批的線段都記下來
+                try:
+                    retry(self.read_geometry, handle, name, ent)   # 先把這批的線段都記下來
+                except Exception as e:
+                    print(f"讀取 {name} (handle {handle}) 失敗，略過: {e!r}")
         if not annotate:
             return
         for handle, name, ent in items:
@@ -508,12 +511,18 @@ class Annotator:
 
     def purge_own(self):
         """刪掉這個空間裡本程式之前畫的標註和中心線（AUTO_DIM、中心線圖層）。"""
-        removed = 0
+        removed = failed = 0
         for i in range(self.space.Count - 1, -1, -1):
-            ent = retry(self.space.Item, i)
-            if retry(lambda: ent.Layer) in OWN_LAYERS:
-                retry(ent.Delete)
-                removed += 1
+            try:
+                ent = retry(self.space.Item, i)
+                if retry(lambda: ent.Layer) in OWN_LAYERS:
+                    retry(ent.Delete)
+                    removed += 1
+            except Exception as e:
+                failed += 1
+                log(f"刪除第 {i} 個物件失敗: {e!r}")
+        if failed:
+            print(f"有 {failed} 個舊標註刪不掉，略過")
         self.done = set()
         self.has_old_dims = False
         return removed
@@ -1063,8 +1072,10 @@ def run_views(doc, space, text_height):
     removed = ann.purge_own()
     if removed:
         print(f"清除之前的自動標註 {removed} 個")
+    print("讀取圖形…")
     ann = Annotator(doc, space, text_height)
     ann.scan(0, space.Count, annotate=False)
+    print("開始標註…")
     ann.annotate_views()
     return ann
 
@@ -1263,8 +1274,7 @@ def main():
                 log("AutoCAD 忙碌中，稍後重試…")
             else:
                 print(f"錯誤: {e!r}")
-                if VERBOSE:
-                    traceback.print_exc()
+                traceback.print_exc()
 
         try:
             time.sleep(POLL_INTERVAL)
