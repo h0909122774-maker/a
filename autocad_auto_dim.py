@@ -78,7 +78,7 @@ ARC_CENTERLINE_MIN_DEG = 180  # 弧要大於這個角度才畫中心線（小圓
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 VIEW_SEGMENTS = False         # 三視圖：是否標每段線長（工程圖通常不標，預設關）
-LABEL_LEADERS = (2, 4, 7, 11)  # 圓/弧標註引線長度候選（字高的倍數），擠的時候會拉長
+LABEL_LEADERS = (2, 4, 7, 11, 16) # 圓/弧標註引線長度候選（字高的倍數），擠的時候會拉長
 VIEW_EACH_ARC = False         # 三視圖：True 每個弧都標 R；False 相同半徑只標一次
 VIEW_OVERALL = False          # 三視圖：有孔時是否另外標總長、總高
 VIEWS_VAR = "USERI4"          # AutoCAD 裡輸入 ADVIEWS（設 USERI4 = 1）就對目前圖面做工程圖式標註
@@ -354,6 +354,26 @@ def poly_arcs(ent):
         yield PolyArc((cx, cy), r, start, end, f"{handle}:{i}")
 
 
+def seg_hits_rect(p1, p2, rect):
+    """線段是否碰到矩形（Liang-Barsky 裁切）。"""
+    x0, y0, x1, y1 = rect
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, p1[0] - x0), (dx, x1 - p1[0]), (-dy, p1[1] - y0), (dy, y1 - p1[1])):
+        if abs(p) < 1e-12:
+            if q < 0:
+                return False
+        else:
+            t = q / p
+            if p < 0:
+                t0 = max(t0, t)
+            else:
+                t1 = min(t1, t)
+            if t0 > t1:
+                return False
+    return True
+
+
 def owner(sid):
     """線段 id（handle 或 handle:段號）所屬的物件 handle。"""
     return str(sid).split(":")[0]
@@ -401,6 +421,8 @@ class Annotator:
         self.has_old_dims = False  # 圖裡已經有本程式之前畫的標註
         self.claims = {}           # 幾何位置 -> 先標它的物件 handle（避免重複標註）
         self.occupied = []         # 已放好的標註文字範圍（避免擠在一起）
+        self.view_segs = []        # 目前視圖的線段（標註文字要避開）
+        self.view_rounds = []      # 目前視圖的圓/弧 (cx, cy, r)
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
@@ -879,6 +901,23 @@ class Annotator:
                 total += dx * dy
         return total
 
+    def geometry_hits(self, rect):
+        """文字範圍壓到幾條圖形線（線段、圓/弧的邊）。"""
+        x0, y0, x1, y1 = rect
+        hits = 0
+        for p1, p2 in self.view_segs:
+            if seg_hits_rect(p1, p2, rect):
+                hits += 1
+        for cx, cy, r in self.view_rounds:
+            # 圓周穿過矩形：圓心到矩形最近距離 <= r <= 最遠距離
+            nx = min(max(cx, x0), x1) - cx
+            ny = min(max(cy, y0), y1) - cy
+            near = math.hypot(nx, ny)
+            far = math.hypot(max(abs(cx - x0), abs(cx - x1)), max(abs(cy - y0), abs(cy - y1)))
+            if near <= r <= far:
+                hits += 1
+        return hits
+
     def place_label(self, cx, cy, r, text, angles, view_box):
         """在候選方向、引線長度中，挑一個不和其他標註重疊、盡量在圖形外面的位置。"""
         best = None
@@ -891,6 +930,7 @@ class Annotator:
                 tx, ty = cx + dist * ux, cy + dist * uy
                 rect = self.text_rect(tx, ty, text)
                 score = self.overlap(rect) * 1000
+                score += self.geometry_hits(rect) * self.h * self.h * 50   # 壓到圖形線：重罰
                 vx0, vy0, vx1, vy1 = view_box
                 if vx0 < tx < vx1 and vy0 < ty < vy1:
                     score += self.h * self.h * 4       # 在圖形裡面：不是不行，但盡量放外面
@@ -921,7 +961,7 @@ class Annotator:
             return call(self.space, "AddDimRadial", apt(cx, cy),
                         apt(cx + r * math.cos(ang), cy + r * math.sin(ang)), lead)
         text = (f"{count}X" if count > 1 else "") + f"Ø{2 * r:g}"
-        cands = [base + math.radians(d) for d in (0, 30, -30, 60, -60, 90, -90, 135, -135, 180)]
+        cands = [base + math.radians(d) for d in (0, 20, -20, 40, -40, 60, -60, 90, -90, 120, -120, 150, -150, 180)]
         ang, lead = self.place_label(cx, cy, r, text, cands, view_box)
         ux, uy = math.cos(ang), math.sin(ang)
         d = call(self.space, "AddDimDiametric", apt(cx + r * ux, cy + r * uy),
@@ -985,8 +1025,13 @@ class Annotator:
 
                 # 孔大小：同直徑一組，挑離視圖中心最遠的那個標（引線比較好往外拉）
                 groups = {}
+                seen_circle = set()
                 for nm, e in circles:
-                    groups.setdefault((nm, round(e.Radius, 4)), []).append(e)
+                    ck = (pt_key(e.Center), round(e.Radius, 2))
+                    if ck in seen_circle:
+                        continue      # 重疊的同一個圓（畫了兩次）只算一個
+                    seen_circle.add(ck)
+                    groups.setdefault((nm, round(e.Radius, 2)), []).append(e)
                 for nm, e in arcs:
                     if VIEW_EACH_ARC:      # 每個弧各自標 R（同位置同半徑的重複弧只標一次）
                         groups.setdefault((nm, round(e.Radius, 4), pt_key(e.Center)), []).append(e)
@@ -996,6 +1041,8 @@ class Annotator:
                 off2 = self.k(LINE_OFFSET) * 2
                 self.occupied = [(x0 - self.h * 4, y0 - off2 - self.h * 1.5, x1 + self.h * 4, y0 - off2 + self.h * 1.5),
                                  (x0 - off2 - self.h * 1.5, y0 - self.h * 4, x0 - off2 + self.h * 1.5, y1 + self.h * 4)]
+                self.view_segs = [self.segments[sid] for _, kind, sid in members if kind == "seg"]
+                self.view_rounds = [(e.Center[0], e.Center[1], e.Radius) for _, e in circles + arcs]
                 per_center = {}
                 for (nm, _, *_rest), ents in sorted(groups.items(), key=lambda kv: -kv[0][1]):
                     rep = max(ents, key=lambda e: math.hypot(e.Center[0] - view_center[0],
