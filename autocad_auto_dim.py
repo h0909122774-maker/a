@@ -53,7 +53,7 @@ import traceback
 
 import comtypes.client
 import comtypes.client.dynamic
-from comtypes.automation import IDispatch
+from comtypes.automation import IDispatch, VARIANT, VT_I2
 from comtypes import COMError
 
 # ---------------- 可調整的設定 ----------------
@@ -770,6 +770,15 @@ class Annotator:
         views.sort(key=lambda v: (-v[0][3], v[0][0]))   # 由上到下、由左到右
         return views
 
+    def step(self, label, fn, default=None):
+        """執行一個標註步驟；失敗就印出原因，繼續做下一步（不讓一個錯誤害整張圖都沒標）。"""
+        try:
+            return retry(fn)
+        except Exception as e:
+            print(f"  {label} 失敗: {e!r}")
+            traceback.print_exc()
+            return default
+
     def chain_dims(self, centers, box, horizontal):
         """孔中心位置的串連尺寸（像 40 | 45 | 12）：水平的標在視圖下方，垂直的標在左方。"""
         x0, y0, x1, y1 = box
@@ -835,7 +844,7 @@ class Annotator:
         - 不標每一段線長（VIEW_SEGMENTS = True 可打開）
         """
         views = self.find_views()
-        print(f"找到 {len(views)} 個視圖")
+        print(f"找到 {len(views)} 個視圖（線段 {len(self.segments)} 段、圓/弧 {len(self.round_items)} 個）")
         for n, (box, members) in enumerate(views, 1):
             x0, y0, x1, y1 = box
             size = max(x1 - x0, y1 - y0)
@@ -855,8 +864,8 @@ class Annotator:
                     centers.setdefault(pt_key(e.Center), (e.Center[0], e.Center[1]))
                 centers = list(centers.values())
                 if len(centers) >= 2:
-                    dims += self.chain_dims(centers, box, horizontal=True)
-                    dims += self.chain_dims(centers, box, horizontal=False)
+                    dims += self.step("水平位置尺寸", lambda: self.chain_dims(centers, box, True), [])
+                    dims += self.step("垂直位置尺寸", lambda: self.chain_dims(centers, box, False), [])
 
                 if VIEW_OVERALL or not centers:
                     off = self.k(LINE_OFFSET) * (4 if centers else 1)
@@ -876,15 +885,18 @@ class Annotator:
                     k = pt_key(rep.Center)
                     spread = per_center.get(k, 0)
                     per_center[k] = spread + 1
-                    dims.append(self.size_label(nm, rep, len(ents), view_center, spread))
+                    d = self.step(f"{nm} R{rep.Radius:g} 大小標註",
+                                  lambda: self.size_label(nm, rep, len(ents), view_center, spread))
+                    if d is not None:
+                        dims.append(d)
 
                 # 中心線：最大的圓當主圓心畫長中心線，其他圓畫小十字
                 if circles:
                     main = max(circles, key=lambda t: t[1].Radius)[1]
-                    self.main_centerlines((main.Center[0], main.Center[1]), box)
+                    self.step("主中心線", lambda: self.main_centerlines((main.Center[0], main.Center[1]), box))
                     self.claims[("center", pt_key(main.Center))] = "views"
                 for nm, e in circles:
-                    self.centerline(e.Center, e.Radius, owner_handle=e.Handle)
+                    self.step("中心線", lambda: self.centerline(e.Center, e.Radius, owner_handle=e.Handle))
 
                 if VIEW_SEGMENTS:
                     for _, kind, sid in members:
@@ -902,8 +914,7 @@ class Annotator:
                 print(f"視圖 {n}: {x1 - x0:g} × {y1 - y0:g}，{len(dims)} 個標註，字高 {self.h:g}")
             except Exception as e:
                 print(f"視圖 {n} 標註失敗: {e!r}")
-                if VERBOSE:
-                    traceback.print_exc()
+                traceback.print_exc()
 
     @staticmethod
     def wants_centerline(name, ent):
@@ -1030,6 +1041,20 @@ def annotate_file(acad, path, save, text_height, views=False):
         retry(doc.SaveAs, out)
         print(f"已另存: {out}")
     return doc, space, ann
+
+
+def set_int_var(doc, name, value):
+    """設定整數系統變數。AutoCAD 的 USERIx 要 16 位元整數 (VT_I2)，
+    直接傳 Python int 會被當成 32 位元而回「無效的類別」。"""
+    v = VARIANT()
+    v.vt = VT_I2
+    v._.VT_I2 = int(value)
+    try:
+        doc.SetVariable(name, v)
+        return
+    except Exception as e:
+        log(f"SetVariable({name}) 失敗: {e!r}，改用指令設定")
+    doc.SendCommand(f'(setvar "{name}" {int(value)}) ')
 
 
 def run_views(doc, space, text_height):
@@ -1201,7 +1226,7 @@ def main():
                 except Exception:
                     want_views = False
                 if want_views:
-                    doc.SetVariable(VIEWS_VAR, 0)
+                    set_int_var(doc, VIEWS_VAR, 0)
                     print("收到 ADVIEWS：工程圖式標註…")
                     annotators[key] = run_views(doc, space, args.text)
                     counts[key] = space.Count
