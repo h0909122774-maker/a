@@ -73,7 +73,8 @@ ANGLE_RADIUS = 5.0            # 角度標註弧線離頂點的距離（線太短
 CENTER_EXTEND = 1.5           # 中心線超出圓的長度
 DIM_ANGLES = True             # 是否標註相接兩線的角度
 SKIP_RIGHT_ANGLE = True       # True: 90 度不標（改 False 就連直角也標）
-DRAW_CENTERLINES = True       # 是否幫圓/弧畫中心線
+DRAW_CENTERLINES = True       # 是否幫圓畫中心線
+ARC_CENTERLINE_MIN_DEG = 180  # 弧要大於這個角度才畫中心線（小圓角 R5 之類的不畫）
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 SYNC_CHANGES = True           # 刪除物件時一起刪標註、修改物件時重新標註
@@ -590,8 +591,8 @@ class Annotator:
         elif name in ("AcDbCircle", "AcDbArc"):
             d = self.dim_circle(ent) if name == "AcDbCircle" else self.dim_arc(ent)
             out += d
-            if d:      # 和別的圓重疊（已標過）就不再畫中心線
-                self.centerline(ent.Center, ent.Radius)
+            if d and self.wants_centerline(name, ent):
+                self.centerline(ent.Center, ent.Radius, owner_handle=ent.Handle)
         elif name == "AcDbPoint":
             out += self.dim_point(ent)
         elif is_solid(name):
@@ -867,7 +868,7 @@ class Annotator:
                             got = self.dim_arc(ent)
                         dims += got
                     if name == "AcDbCircle":
-                        self.centerline(ent.Center, ent.Radius)
+                        self.centerline(ent.Center, ent.Radius, owner_handle=ent.Handle)
                 for d in dims:
                     put(d, "Layer", DIM_LAYER)
                     try:
@@ -880,9 +881,19 @@ class Annotator:
                 if VERBOSE:
                     traceback.print_exc()
 
-    def centerline(self, center, r):
-        """畫十字中心線（水平 + 垂直），放在中心線圖層。"""
+    @staticmethod
+    def wants_centerline(name, ent):
+        """圓都畫；弧只有大弧才畫（圓角這種小弧畫了只會滿圖都是中心線）。"""
+        if name == "AcDbCircle":
+            return True
+        sweep = math.degrees((ent.EndAngle - ent.StartAngle) % (2 * math.pi))
+        return sweep >= ARC_CENTERLINE_MIN_DEG
+
+    def centerline(self, center, r, owner_handle=None):
+        """畫十字中心線（水平 + 垂直），放在中心線圖層。同一個圓心只畫一組。"""
         if not DRAW_CENTERLINES:
+            return
+        if owner_handle is not None and not self.claim(("center", pt_key(center)), owner_handle):
             return
         cx, cy = center[0], center[1]
         half = r + self.k(CENTER_EXTEND)
