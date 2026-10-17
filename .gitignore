@@ -5,3 +5,5 @@ dist/
 *.build/
 *.dist/
 *.onefile-build/
+build/
+nuitka-crash-report.xml
