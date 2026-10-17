@@ -78,6 +78,7 @@ ARC_CENTERLINE_MIN_DEG = 180  # 弧要大於這個角度才畫中心線（小圓
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
 VIEW_SEGMENTS = False         # 三視圖：是否標每段線長（工程圖通常不標，預設關）
+LABEL_LEADERS = (2, 4, 7, 11)  # 圓/弧標註引線長度候選（字高的倍數），擠的時候會拉長
 VIEW_EACH_ARC = False         # 三視圖：True 每個弧都標 R；False 相同半徑只標一次
 VIEW_OVERALL = False          # 三視圖：有孔時是否另外標總長、總高
 VIEWS_VAR = "USERI4"          # AutoCAD 裡輸入 ADVIEWS（設 USERI4 = 1）就對目前圖面做工程圖式標註
@@ -399,6 +400,7 @@ class Annotator:
         self._made = []            # 標註一個物件時順便畫的中心線
         self.has_old_dims = False  # 圖裡已經有本程式之前畫的標註
         self.claims = {}           # 幾何位置 -> 先標它的物件 handle（避免重複標註）
+        self.occupied = []         # 已放好的標註文字範圍（避免擠在一起）
         setup_layers(doc)
         self.ltscale_base = linetype_pattern_length(doc)
 
@@ -860,20 +862,67 @@ class Annotator:
                                  apt(x0 - off, (a[1] + b[1]) / 2), math.pi / 2))
         return dims
 
-    def size_label(self, name, ent, count, view_center, spread):
-        """一組相同大小的圓/弧只標一個：引線往視圖外側拉，數量寫成 2XØ4。"""
+    # ---- 避免標註擠在一起 ----
+    def text_rect(self, x, y, text):
+        """估計文字佔的範圍（中心 x, y）。"""
+        w = max(len(text), 2) * self.h * 0.75 + self.h
+        hh = self.h * 1.8
+        return (x - w / 2, y - hh / 2, x + w / 2, y + hh / 2)
+
+    def overlap(self, rect):
+        """和已經放好的標註重疊的總面積。"""
+        total = 0.0
+        for o in self.occupied:
+            dx = min(rect[2], o[2]) - max(rect[0], o[0])
+            dy = min(rect[3], o[3]) - max(rect[1], o[1])
+            if dx > 0 and dy > 0:
+                total += dx * dy
+        return total
+
+    def place_label(self, cx, cy, r, text, angles, view_box):
+        """在候選方向、引線長度中，挑一個不和其他標註重疊、盡量在圖形外面的位置。"""
+        best = None
+        for lead_k in LABEL_LEADERS:
+            lead = self.k(lead_k)
+            for ang in angles:
+                ux, uy = math.cos(ang), math.sin(ang)
+                half_w = (self.text_rect(0, 0, text)[2])
+                dist = r + lead + half_w
+                tx, ty = cx + dist * ux, cy + dist * uy
+                rect = self.text_rect(tx, ty, text)
+                score = self.overlap(rect) * 1000
+                vx0, vy0, vx1, vy1 = view_box
+                if vx0 < tx < vx1 and vy0 < ty < vy1:
+                    score += self.h * self.h * 4       # 在圖形裡面：不是不行，但盡量放外面
+                score += lead * 0.01                   # 同樣條件下引線短一點比較好
+                if best is None or score < best[0]:
+                    best = (score, ang, lead, rect)
+            if best[0] < 1e-9:
+                break
+        self.occupied.append(best[3])
+        return best[1], best[2]
+
+    def size_label(self, name, ent, count, view_center, spread, view_box=None):
+        """一組相同大小的圓/弧只標一個：引線往外拉、自動避開其他標註，數量寫成 2XØ4。"""
         cx, cy = ent.Center[0], ent.Center[1]
         r = ent.Radius
-        lead = self.k(CIRCLE_LEADER) * 2
+        view_box = view_box or (cx, cy, cx, cy)
+        u = unit(cx - view_center[0], cy - view_center[1])
+        base = math.atan2(u[1], u[0]) if u else math.radians(45)
+        base += math.radians(25) * spread
         if name == "AcDbArc":
             start, end = ent.StartAngle, ent.EndAngle
-            ang = start + ((end - start) % (2 * math.pi)) / 2
-            d = call(self.space, "AddDimRadial", apt(cx, cy),
-                     apt(cx + r * math.cos(ang), cy + r * math.sin(ang)), lead)
-            return d
-        u = unit(cx - view_center[0], cy - view_center[1])
-        ang = math.atan2(u[1], u[0]) if u else math.radians(45)
-        ang += math.radians(25) * spread          # 同圓心好幾個圓時錯開角度
+            sweep = (end - start) % (2 * math.pi) or 2 * math.pi
+            # 引線一定要指在弧上：在弧的範圍內取幾個候選角度，離「往外」方向近的先試
+            cands = [start + sweep * f for f in (0.5, 0.3, 0.7, 0.15, 0.85)]
+            cands.sort(key=lambda a: abs(math.atan2(math.sin(a - base), math.cos(a - base))))
+            text = f"R{r:g}"
+            ang, lead = self.place_label(cx, cy, r, text, cands, view_box)
+            return call(self.space, "AddDimRadial", apt(cx, cy),
+                        apt(cx + r * math.cos(ang), cy + r * math.sin(ang)), lead)
+        text = (f"{count}X" if count > 1 else "") + f"Ø{2 * r:g}"
+        cands = [base + math.radians(d) for d in (0, 30, -30, 60, -60, 90, -90, 135, -135, 180)]
+        ang, lead = self.place_label(cx, cy, r, text, cands, view_box)
         ux, uy = math.cos(ang), math.sin(ang)
         d = call(self.space, "AddDimDiametric", apt(cx + r * ux, cy + r * uy),
                  apt(cx - r * ux, cy - r * uy), lead)
@@ -943,6 +992,10 @@ class Annotator:
                         groups.setdefault((nm, round(e.Radius, 4), pt_key(e.Center)), []).append(e)
                     else:
                         groups.setdefault((nm, round(e.Radius, 4)), []).append(e)
+                # 已經被佔用的地方：位置尺寸那兩排
+                off2 = self.k(LINE_OFFSET) * 2
+                self.occupied = [(x0 - self.h * 4, y0 - off2 - self.h * 1.5, x1 + self.h * 4, y0 - off2 + self.h * 1.5),
+                                 (x0 - off2 - self.h * 1.5, y0 - self.h * 4, x0 - off2 + self.h * 1.5, y1 + self.h * 4)]
                 per_center = {}
                 for (nm, _, *_rest), ents in sorted(groups.items(), key=lambda kv: -kv[0][1]):
                     rep = max(ents, key=lambda e: math.hypot(e.Center[0] - view_center[0],
@@ -951,7 +1004,7 @@ class Annotator:
                     spread = per_center.get(k, 0)
                     per_center[k] = spread + 1
                     d = self.step(f"{nm} R{rep.Radius:g} 大小標註",
-                                  lambda: self.size_label(nm, rep, len(ents), view_center, spread))
+                                  lambda: self.size_label(nm, rep, len(ents), view_center, spread, box))
                     if d is not None:
                         dims.append(d)
 
