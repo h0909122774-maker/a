@@ -77,6 +77,9 @@ DRAW_CENTERLINES = True       # 是否幫圓畫中心線
 ARC_CENTERLINE_MIN_DEG = 180  # 弧要大於這個角度才畫中心線（小圓角 R5 之類的不畫）
 VIEW_GAP_RATIO = 0.01         # 三視圖：相距小於圖寬 1% 的東西算同一個視圖
 VIEW_MIN_SEGMENT = 0.05       # 三視圖：短於視圖大小 5% 的線段不標
+VIEW_SEGMENTS = False         # 三視圖：是否標每段線長（工程圖通常不標，預設關）
+VIEW_OVERALL = False          # 三視圖：有孔時是否另外標總長、總高
+VIEWS_VAR = "USERI4"          # AutoCAD 裡輸入 ADVIEWS（設 USERI4 = 1）就對目前圖面做工程圖式標註
 SYNC_CHANGES = True           # 刪除物件時一起刪標註、修改物件時重新標註
 CHECK_INTERVAL = 1.0          # 每幾秒檢查一次刪除/修改
 SKIP_LAYERS = set()           # 這些圖層上的東西不標註，例如 {"組合件", "標準件"}
@@ -767,98 +770,129 @@ class Annotator:
         views.sort(key=lambda v: (-v[0][3], v[0][0]))   # 由上到下、由左到右
         return views
 
-    def chain_dims(self, rounds, box, size, horizontal):
-        """孔中心位置的串連尺寸：水平方向標在視圖下方，垂直方向標在視圖右方。"""
+    def chain_dims(self, centers, box, horizontal):
+        """孔中心位置的串連尺寸（像 40 | 45 | 12）：水平的標在視圖下方，垂直的標在左方。"""
         x0, y0, x1, y1 = box
-        if not rounds:
-            return []
-        off = self.k(LINE_OFFSET)
-        merge = size * 0.005
-        if horizontal:
-            stops = [(x0, (x0, y0)), (x1, (x1, y0))]
-            stops += [(e.Center[0], (e.Center[0], e.Center[1])) for _, e, _ in rounds]
-        else:
-            stops = [(y0, (x1, y0)), (y1, (x1, y1))]
-            stops += [(e.Center[1], (e.Center[0], e.Center[1])) for _, e, _ in rounds]
-        stops.sort(key=lambda t: t[0])
+        off = self.k(LINE_OFFSET) * 2
+        merge = max(x1 - x0, y1 - y0) * 0.005
+        axis = 0 if horizontal else 1
+        stops = sorted(centers, key=lambda c: c[axis])
         uniq = []
-        for v, p in stops:
-            if not uniq or v - uniq[-1][0] > merge:
-                uniq.append((v, p))
-        if len(uniq) <= 2:
-            return []      # 和總長/總高一樣，不用另外標
+        for c in stops:
+            if not uniq or c[axis] - uniq[-1][axis] > merge:
+                uniq.append(c)
         dims = []
-        for (va, pa), (vb, pb) in zip(uniq, uniq[1:]):
+        for a, b in zip(uniq, uniq[1:]):
             if horizontal:
-                dims.append(call(self.space, "AddDimRotated", apt(*pa), apt(*pb),
-                                 apt((va + vb) / 2, y0 - off), 0.0))
+                dims.append(call(self.space, "AddDimRotated", apt(*a), apt(*b),
+                                 apt((a[0] + b[0]) / 2, y0 - off), 0.0))
             else:
-                dims.append(call(self.space, "AddDimRotated", apt(*pa), apt(*pb),
-                                 apt(x1 + off, (va + vb) / 2), math.pi / 2))
+                dims.append(call(self.space, "AddDimRotated", apt(*a), apt(*b),
+                                 apt(x0 - off, (a[1] + b[1]) / 2), math.pi / 2))
         return dims
 
+    def size_label(self, name, ent, count, view_center, spread):
+        """一組相同大小的圓/弧只標一個：引線往視圖外側拉，數量寫成 2XØ4。"""
+        cx, cy = ent.Center[0], ent.Center[1]
+        r = ent.Radius
+        lead = self.k(CIRCLE_LEADER) * 2
+        if name == "AcDbArc":
+            start, end = ent.StartAngle, ent.EndAngle
+            ang = start + ((end - start) % (2 * math.pi)) / 2
+            d = call(self.space, "AddDimRadial", apt(cx, cy),
+                     apt(cx + r * math.cos(ang), cy + r * math.sin(ang)), lead)
+            return d
+        u = unit(cx - view_center[0], cy - view_center[1])
+        ang = math.atan2(u[1], u[0]) if u else math.radians(45)
+        ang += math.radians(25) * spread          # 同圓心好幾個圓時錯開角度
+        ux, uy = math.cos(ang), math.sin(ang)
+        d = call(self.space, "AddDimDiametric", apt(cx + r * ux, cy + r * uy),
+                 apt(cx - r * ux, cy - r * uy), lead)
+        if count > 1:
+            put(d, "TextOverride", f"{count}X%%c<>")
+        return d
+
+    def main_centerlines(self, center, box):
+        """主圓心的長中心線，橫跨整個視圖。"""
+        x0, y0, x1, y1 = box
+        ext = self.k(CENTER_EXTEND) * 2
+        cx, cy = center
+        lt_scale = max((x1 - x0 + y1 - y0) / (self.ltscale_base * 8), 0.01)
+        for (a, b) in (((x0 - ext, cy), (x1 + ext, cy)), ((cx, y0 - ext), (cx, y1 + ext))):
+            line = call(self.space, "AddLine", apt(*a), apt(*b))
+            put(line, "Layer", CENTER_LAYER)
+            try:
+                put(line, "LinetypeScale", lt_scale)
+            except Exception:
+                pass
+            self.done.add(get(line, "Handle"))
+
     def annotate_views(self):
-        """三視圖標註：每個視圖標總長、總高、主要線段長度、圓的直徑與中心線。"""
+        """工程圖式標註（每個視圖）：
+        - 孔位置：各圓心之間的串連尺寸（下方水平、左方垂直）
+        - 孔大小：相同直徑只標一次，寫成 2XØ4；圓角相同半徑只標一次 R5
+        - 主圓心畫長中心線，每個圓畫十字中心線
+        - 不標每一段線長（VIEW_SEGMENTS = True 可打開）
+        """
         views = self.find_views()
         print(f"找到 {len(views)} 個視圖")
-        for n, ((x0, y0, x1, y1), members) in enumerate(views, 1):
+        for n, (box, members) in enumerate(views, 1):
+            x0, y0, x1, y1 = box
             size = max(x1 - x0, y1 - y0)
             if size <= TOL:
                 continue
             self.use_height(self.height_for(size))
-            off = self.k(LINE_OFFSET)
             dims = []
             try:
                 rounds = [self.round_items[h] for _, kind, h in members if kind == "round"]
-                # 孔位置的串連尺寸（像 40 | 45 | 12 這樣，從邊到各孔中心）
-                chain_x = self.chain_dims(rounds, (x0, y0, x1, y1), size, horizontal=True)
-                chain_y = self.chain_dims(rounds, (x0, y0, x1, y1), size, horizontal=False)
-                dims += chain_x + chain_y
-                # 總長（下方）、總高（左方），有串連尺寸時放在更外面一層
-                ox = off * (2 if chain_x else 1)
-                oy = off * (2 if chain_y else 1)
-                if x1 - x0 > TOL:
+                circles = [(nm, e) for nm, e, _ in rounds if nm == "AcDbCircle"]
+                arcs = [(nm, e) for nm, e, _ in rounds if nm == "AcDbArc"]
+                view_center = ((x0 + x1) / 2, (y0 + y1) / 2)
+
+                # 孔中心（圓心；大弧的圓心也算，例如繞著孔的凸耳）
+                centers = {}
+                for nm, e in circles + [(nm, e) for nm, e in arcs if self.wants_centerline(nm, e)]:
+                    centers.setdefault(pt_key(e.Center), (e.Center[0], e.Center[1]))
+                centers = list(centers.values())
+                if len(centers) >= 2:
+                    dims += self.chain_dims(centers, box, horizontal=True)
+                    dims += self.chain_dims(centers, box, horizontal=False)
+
+                if VIEW_OVERALL or not centers:
+                    off = self.k(LINE_OFFSET) * (4 if centers else 1)
                     dims.append(call(self.space, "AddDimRotated", apt(x0, y0), apt(x1, y0),
-                                     apt((x0 + x1) / 2, y0 - ox), 0.0))
-                if y1 - y0 > TOL:
+                                     apt((x0 + x1) / 2, y0 - off), 0.0))
                     dims.append(call(self.space, "AddDimRotated", apt(x0, y0), apt(x0, y1),
-                                     apt(x0 - oy, (y0 + y1) / 2), math.pi / 2))
-                # 主要線段：同一視圖裡相同方向、相同長度的只標一次，太短的不標
-                seen = set()
-                for _, kind, sid in members:
-                    if kind != "seg":
-                        continue
-                    p1, p2 = self.segments[sid]
-                    length = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-                    if length < size * VIEW_MIN_SEGMENT or abs(length - (x1 - x0)) < TOL \
-                            and abs(p1[1] - p2[1]) < TOL or abs(length - (y1 - y0)) < TOL \
-                            and abs(p1[0] - p2[0]) < TOL:
-                        continue   # 太短，或和總長/總高重複
-                    direction = round(math.degrees(math.atan2(p2[1] - p1[1], p2[0] - p1[0])) % 180, 1)
-                    key = (round(length, 4), direction)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    dims += self.dim_segment(sid)
-                # 圓與弧：同一視圖相同大小只標一次；有好幾個時寫成「4X Ø6」
-                counts = {}
-                for name, ent, _ in rounds:
-                    key = (name, round(ent.Radius, 4))
-                    counts[key] = counts.get(key, 0) + 1
-                seen_r = set()
-                for name, ent, _ in rounds:
-                    key = (name, round(ent.Radius, 4))
-                    if key not in seen_r:
-                        seen_r.add(key)
-                        if name == "AcDbCircle":
-                            got = self.dim_circle(ent)
-                            if got and counts[key] > 1:
-                                put(got[0], "TextOverride", f"{counts[key]}X%%c<>")
-                        else:
-                            got = self.dim_arc(ent)
-                        dims += got
-                    if name == "AcDbCircle":
-                        self.centerline(ent.Center, ent.Radius, owner_handle=ent.Handle)
+                                     apt(x0 - off, (y0 + y1) / 2), math.pi / 2))
+
+                # 孔大小：同直徑一組，挑離視圖中心最遠的那個標（引線比較好往外拉）
+                groups = {}
+                for nm, e in circles + arcs:
+                    groups.setdefault((nm, round(e.Radius, 4)), []).append(e)
+                per_center = {}
+                for (nm, _), ents in sorted(groups.items(), key=lambda kv: -kv[0][1]):
+                    rep = max(ents, key=lambda e: math.hypot(e.Center[0] - view_center[0],
+                                                             e.Center[1] - view_center[1]))
+                    k = pt_key(rep.Center)
+                    spread = per_center.get(k, 0)
+                    per_center[k] = spread + 1
+                    dims.append(self.size_label(nm, rep, len(ents), view_center, spread))
+
+                # 中心線：最大的圓當主圓心畫長中心線，其他圓畫小十字
+                if circles:
+                    main = max(circles, key=lambda t: t[1].Radius)[1]
+                    self.main_centerlines((main.Center[0], main.Center[1]), box)
+                    self.claims[("center", pt_key(main.Center))] = "views"
+                for nm, e in circles:
+                    self.centerline(e.Center, e.Radius, owner_handle=e.Handle)
+
+                if VIEW_SEGMENTS:
+                    for _, kind, sid in members:
+                        if kind == "seg":
+                            p1, p2 = self.segments[sid]
+                            if math.hypot(p2[0] - p1[0], p2[1] - p1[1]) >= size * VIEW_MIN_SEGMENT:
+                                dims += self.dim_segment(sid)
+
                 for d in dims:
                     put(d, "Layer", DIM_LAYER)
                     try:
@@ -987,8 +1021,7 @@ def annotate_file(acad, path, save, text_height, views=False):
     print(f"模型空間共有 {count} 個物件，開始標註…")
     ann = Annotator(doc, space, text_height)
     if views:
-        ann.scan(0, count, annotate=False)
-        ann.annotate_views()
+        ann = run_views(doc, space, text_height)
     else:
         ann.scan(0, count)
     if save:
@@ -997,6 +1030,18 @@ def annotate_file(acad, path, save, text_height, views=False):
         retry(doc.SaveAs, out)
         print(f"已另存: {out}")
     return doc, space, ann
+
+
+def run_views(doc, space, text_height):
+    """工程圖式標註：先清掉之前的自動標註/中心線，再整張重標。"""
+    ann = Annotator(doc, space, text_height)
+    removed = ann.purge_own()
+    if removed:
+        print(f"清除之前的自動標註 {removed} 個")
+    ann = Annotator(doc, space, text_height)
+    ann.scan(0, space.Count, annotate=False)
+    ann.annotate_views()
+    return ann
 
 
 def read_pause(doc):
@@ -1104,10 +1149,7 @@ def main():
 
     if args.views and not args.files:
         doc = cast(acad.ActiveDocument, "IAcadDocument")
-        space = active_space(doc)
-        ann = Annotator(doc, space, args.text)
-        ann.scan(0, space.Count, annotate=False)
-        ann.annotate_views()
+        run_views(doc, active_space(doc), args.text)
     if args.once or args.views:
         print("完成。")
         return
@@ -1151,6 +1193,18 @@ def main():
                     counts[key] = space.Count
                 ann = annotators[key]
                 ann.space = space
+
+                # AutoCAD 裡輸入 ADVIEWS：整張圖改成工程圖式標註
+                try:
+                    want_views = int(doc.GetVariable(VIEWS_VAR)) == 1
+                except Exception:
+                    want_views = False
+                if want_views:
+                    doc.SetVariable(VIEWS_VAR, 0)
+                    print("收到 ADVIEWS：工程圖式標註…")
+                    annotators[key] = run_views(doc, space, args.text)
+                    counts[key] = space.Count
+                    continue
 
                 paused = local_pause or read_pause(doc)
                 if paused != was_paused:

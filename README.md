@@ -86,7 +86,7 @@ SKETCHCONCEPT_REPO=... SKETCHCONCEPT_PYTHON=... python3 tests/test_bridge.py   #
 字高預設用標註型式的標準字高 (DIMTXT)，只有大於 200 的物件才等比例放大；`--text 數字` 可固定字高。
 雙擊 `start_autodim.bat`（等同 `--all`）：每開一張圖就自動把整張圖標好；已有自動標註的圖會先刪掉舊的再重標，之後縮放、修改都會跟著更新。
 監看模式下，刪除物件會一併刪除它的標註與中心線，修改物件（移動、拉伸、改半徑…）會重新標註。
-**三視圖**：`python autocad_auto_dim.py --views`（或 `圖檔.dwg --views`）自動分出每個視圖，標總長、總高、主要線段（同長度只標一次）、圓的直徑與中心線。
+**工程圖式（三視圖）**：`python autocad_auto_dim.py --views`，或在 AutoCAD 輸入 `ADVIEWS`（需載入 `autodim_toggle.lsp`、Python 在背景執行）。先清掉之前的自動標註，再每個視圖：孔中心串連位置尺寸（下方水平、左方垂直）、相同直徑只標一次寫成 `6XØ7`、相同圓角只標一次 `R8`、主圓心長中心線、各孔十字中心線；預設不標每段線長（`VIEW_SEGMENTS`）。
 會建立圖層 `AUTO_DIM`（標註）、`中心線`（CENTER 線型）、`虛線`（HIDDEN 線型，設為目前圖層即可畫虛線）。
 其他參數：`--now`（畫一段標一段）、`--no-save`、`-v`（除錯訊息）。設定值在檔案開頭。
 
