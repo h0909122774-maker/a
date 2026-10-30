@@ -2,35 +2,4 @@
   AutoCAD 自動標註程式  使用說明
   檔案：autocad_auto_dim.py / start_autodim.bat / autodim_toggle.lsp
 
-十、授權（上鎖）
---------------------------------------------------------------
-【使用者】
-1. 第一次執行 AutoDim.exe（或 start_autodim.bat）會顯示「機器碼」，
-   例如 A1B2-C3D4-E5F6。把機器碼傳給作者。
-2. 作者給你授權碼後，貼到「授權碼：」後面按 Enter。
-3. 授權碼只能用在這台電腦，存在 %APPDATA%\AutoDim\license.key。
-   換電腦要重新申請；授權到期也要重新申請。
-4. 只想看機器碼：AutoDim.exe --machine-code
-
-【作者（只有你自己做）】
-需要 Python 3.13：py -3.13 -m pip install comtypes（不需要其他套件）
-1. 第一次：產生金鑰（只做一次！）
-       py -3.13 keygen.py init
-   → 產生 private_key.pem，公鑰自動寫進 licensing.py
-   → private_key.pem 一定要備份，而且絕對不能給別人
-2. 打包成 exe：雙擊 build_exe.bat
-   → 產生 dist 資料夾，只把 dist 裡的檔案給別人
-     (AutoDim.exe、start_autodim.bat、autodim_toggle.lsp、使用說明.txt)
-3. 發授權碼：
-       py -3.13 keygen.py 機器碼                 永久
-       py -3.13 keygen.py 機器碼 --days 365      一年
-       py -3.13 keygen.py 機器碼 --until 2027-12-31
-4. 絕對不要給別人：autocad_auto_dim.py、licensing.py、ed25519_pure.py、keygen.py、private_key.pem
-
-注意：
-- 程式是編譯過的 exe，看不到原始碼，但世上沒有破解不了的保護，
-  這是讓一般人和大多數會寫程式的人都無法使用。
-- private_key.pem 遺失：只能重新 init、重新打包，所有舊授權碼都會失效。
-- GitHub 上的 repo 請設成 Private，否則原始碼誰都看得到。
-
 ==============================================================
