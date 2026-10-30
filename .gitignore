@@ -7,3 +7,5 @@ dist/
 *.onefile-build/
 build/
 nuitka-crash-report.xml
+source_pkg/
+AutoDim_source.zip
