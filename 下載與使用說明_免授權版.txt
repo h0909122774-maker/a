@@ -1,0 +1,78 @@
+﻿==============================================================
+  AutoDim 免授權原始碼版  下載與使用說明
+==============================================================
+
+這個版本不需要授權碼，任何人下載後照下面步驟就能用。
+功能和授權版一樣（自動標註、ADVIEWS 工程圖式標註、ADON/ADOFF 開關…）。
+
+
+一、下載程式
+--------------------------------------------------------------
+1. 用瀏覽器打開：
+       https://github.com/h0909122774-maker/a/tree/free
+   （網址最後是 free，代表免授權版；不要用 master，那是授權版）
+2. 按綠色的「Code」按鈕 →「Download ZIP」
+3. 把下載的 a-free.zip 解壓縮
+4. 把解壓縮出來的資料夾改名成 autodim，搬到 C:\
+   → 最後要變成 C:\autodim\autocad_auto_dim.py 這樣的位置
+
+   用得到的檔案：
+     autocad_auto_dim.py   主程式
+     start_autodim.bat     雙擊啟動
+     autodim_toggle.lsp    AutoCAD 指令 ADON / ADOFF / ADSW / ADVIEWS
+     使用說明.txt           完整功能說明
+   其他檔案（autodim.lsp、bridge、tests…）不用管。
+
+
+二、安裝 Python（只要做一次）
+--------------------------------------------------------------
+1. 打開 https://www.python.org/downloads/windows/
+2. 在 Python 3.13 那一段，點「Windows installer (64-bit)」下載
+3. 執行安裝檔，最下面一定要勾「Add python.exe to PATH」
+4. 按「Install Now」，看到 Setup was successful 按 Close
+5. 按 Windows 鍵，輸入 cmd 按 Enter，輸入下面這行後按 Enter：
+       python -m pip install comtypes
+   最後出現 Successfully installed comtypes 就完成了。
+
+
+三、在 AutoCAD 載入指令（只要做一次）
+--------------------------------------------------------------
+1. 打開 AutoCAD，輸入 APPLOAD
+2. 選 C:\autodim\autodim_toggle.lsp，按「載入」
+3. 想每次自動載入：同一個視窗按「啟動程式集」→「加入」這個檔案
+
+
+四、每次使用
+--------------------------------------------------------------
+1. 先打開 AutoCAD
+2. 雙擊 C:\autodim\start_autodim.bat
+   → 出現黑色視窗，畫圖時不要關掉它
+3. 在 AutoCAD 畫圖或開圖：
+   - 開啟圖檔：整張圖自動標好
+   - 新畫的東西：畫完按 Enter 結束指令就會標註
+4. AutoCAD 指令：
+     ADOFF    暫停自動標註
+     ADON     恢復自動標註
+     ADSW     切換
+     ADVIEWS  整張圖改成工程圖式標註（孔位置串連尺寸、2XØ4、R5）
+   建議畫零件圖：ADOFF → 畫完 → ADVIEWS
+5. 結束：關掉黑色視窗。標好的圖記得自己存檔。
+
+更多參數、可調整的設定、常見問題，請看「使用說明.txt」。
+
+
+五、常見問題
+--------------------------------------------------------------
+Q：'python' 不是內部或外部命令
+A：Python 安裝時沒勾 Add python.exe to PATH，重新安裝並勾選。
+
+Q：No module named comtypes
+A：在 cmd 執行 python -m pip install comtypes
+
+Q：找不到執行中的 AutoCAD
+A：先開 AutoCAD 再雙擊 start_autodim.bat；AutoCAD LT 不支援。
+
+Q：can't open file ... autocad_auto_dim.py
+A：檔案不在 C:\autodim\，確認第一步的位置。
+
+==============================================================
